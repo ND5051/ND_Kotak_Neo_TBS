@@ -1,0 +1,31 @@
+[
+  {
+    "id": "strat_1787909947",
+    "name": "test",
+    "instrument": "Nifty",
+    "entry_time": "13:05",
+    "exit_time": "13:06",
+    "product_type": "MIS",
+    "underlying_source": "Spot",
+    "trade_type": "Paper",
+    "status": "Completed",
+    "legs": [
+      {
+        "option_type": "CE",
+        "expiry": "08Sep2026",
+        "lots": 1,
+        "position": "Sell",
+        "strike_criteria": "Closest Premium",
+        "strike_type": "ATM",
+        "closest_premium": 25,
+        "strike_value": "25",
+        "stop_loss": 10,
+        "stop_loss_type": "Points",
+        "target": 0,
+        "target_type": "None"
+      }
+    ],
+    "market_protection_value": 5.0,
+    "market_protection_type": "Percentage"
+  }
+]

@@ -1,0 +1,1713 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kotak Neo Trading Bridge</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #f8fafc; /* Slate-50 background */
+            --panel-bg: #ffffff; /* Solid white panels */
+            --border-color: #cbd5e1; /* Slate-300 border */
+            --primary: #059669; /* Emerald-600 */
+            --primary-glow: rgba(5, 150, 105, 0.15);
+            --text-main: #0f172a; /* Slate-900 */
+            --text-muted: #64748b; /* Slate-500 */
+            --error: #dc2626; /* Red-600 */
+            --info: #2563eb; /* Blue-600 */
+            --header-bg: rgba(255, 255, 255, 0.85);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            position: relative;
+            padding-bottom: 60px; /* Space for the bottom logs drawer */
+        }
+
+        /* Ambient background glow */
+        .ambient-glow {
+            position: absolute;
+            width: 600px;
+            height: 600px;
+            border-radius: 50%;
+            filter: blur(140px);
+            z-index: 0;
+            opacity: 0.03;
+            pointer-events: none;
+        }
+
+        .glow-top-left {
+            background-color: var(--primary);
+            top: -200px;
+            left: -200px;
+        }
+
+        .glow-bottom-right {
+            background-color: var(--info);
+            bottom: -200px;
+            right: -200px;
+        }
+
+        /* Top Navigation Header */
+        header {
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(12px);
+            z-index: 10;
+            position: sticky;
+            top: 0;
+        }
+
+        .logo-section {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--primary) 0%, #047857 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-weight: 700;
+            color: white;
+            box-shadow: 0 0 10px var(--primary-glow);
+        }
+
+        .logo-title {
+            font-size: 1.25rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            background: linear-gradient(135deg, var(--text-main) 0%, #334155 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Ticker prices */
+        .tickers-container {
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+
+        .ticker-box {
+            background: #ffffff;
+            border: 1px solid var(--border-color);
+            padding: 6px 14px;
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            min-width: 120px;
+            align-items: flex-start;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+
+        .ticker-label {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .ticker-val {
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: var(--primary);
+            font-family: monospace;
+        }
+
+        /* Tabs trigger */
+        .main-tabs {
+            display: flex;
+            gap: 8px;
+        }
+
+        .tab-trigger {
+            background: none;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            padding: 8px 18px;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+        }
+
+        .tab-trigger:hover {
+            color: var(--text-main);
+            background: rgba(0, 0, 0, 0.05);
+        }
+
+        .tab-trigger.active {
+            color: var(--primary);
+            background: rgba(5, 150, 105, 0.08);
+            border-color: rgba(5, 150, 105, 0.2);
+        }
+
+        .header-meta {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        #live-clock {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            background: #ffffff;
+            border: 1px solid var(--border-color);
+            padding: 6px 12px;
+            border-radius: 20px;
+            letter-spacing: 0.5px;
+        }
+
+        /* Workspace structure */
+        main {
+            flex: 1;
+            padding: 24px 30px;
+            width: 100%;
+            max-width: 1500px;
+            margin: 0 auto;
+            position: relative;
+            z-index: 1;
+        }
+
+        .tab-pane {
+            display: none;
+            animation: fadeIn 0.4s ease;
+        }
+
+        .tab-pane.active {
+            display: block;
+        }
+
+        .workspace-content {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            width: 100%;
+        }
+
+        /* White Panel/Card */
+        .panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 
+                        0 2px 4px -1px rgba(0, 0, 0, 0.03);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .panel-header {
+            margin-bottom: 18px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .panel-header h2 {
+            font-size: 1.2rem;
+            font-weight: 700;
+            color: var(--text-main);
+        }
+
+        .panel-header p {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            margin-top: 2px;
+        }
+
+        /* Form elements */
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .form-row .form-group {
+            flex: 1;
+            margin-bottom: 0;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+
+        .form-control {
+            width: 100%;
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text-main);
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .form-control:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px var(--primary-glow);
+        }
+
+        /* Buttons */
+        .btn {
+            width: 100%;
+            background: linear-gradient(135deg, var(--primary) 0%, #047857 100%);
+            border: none;
+            border-radius: 8px;
+            color: white;
+            padding: 10px 20px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(5, 150, 105, 0.1);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 6px 10px rgba(5, 150, 105, 0.15);
+        }
+
+        .btn-secondary {
+            background: #f1f5f9;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            box-shadow: none;
+        }
+
+        .btn-secondary:hover {
+            background: #e2e8f0;
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+            box-shadow: none;
+        }
+
+        .btn-danger:hover {
+            background: #b91c1c;
+        }
+
+        .btn-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        /* Legs Configuration List */
+        .legs-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            margin-bottom: 12px;
+        }
+
+        .leg-card {
+            background: #f8fafc;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 12px;
+            position: relative;
+        }
+
+        .leg-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            border-bottom: 1px dashed var(--border-color);
+            padding-bottom: 5px;
+        }
+
+        /* Badges */
+        .badge {
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            border: 1px solid transparent;
+        }
+
+        .badge-inactive { background: #e2e8f0; color: var(--text-muted); }
+        .badge-deployed { background: rgba(37, 99, 235, 0.08); color: var(--info); border-color: rgba(37, 99, 235, 0.2); }
+        .badge-warmup { background: #fff7ed; color: #c2410c; border-color: #fed7aa; animation: pulse-warmup 1.5s infinite alternate; }
+        .badge-active { background: rgba(5, 150, 105, 0.08); color: var(--primary); border-color: rgba(5, 150, 105, 0.2); }
+        .badge-completed { background: #f1f5f9; color: var(--text-muted); border-color: var(--border-color); }
+
+        @keyframes pulse-warmup {
+            0% { opacity: 0.8; transform: scale(0.98); }
+            100% { opacity: 1.0; transform: scale(1.02); }
+        }
+
+        /* Tables style */
+        .table-responsive {
+            overflow-x: auto;
+        }
+
+        .custom-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+
+        .custom-table th, .custom-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .custom-table th {
+            color: var(--text-muted);
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            font-weight: 600;
+            background-color: #f8fafc;
+        }
+
+        /* Overlay modal */
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.4);
+            z-index: 100;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-content {
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            padding: 35px;
+            border-radius: 20px;
+            max-width: 450px;
+            width: 90%;
+            text-align: center;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+        }
+
+        /* Bottom logs drawer */
+        .logs-drawer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #0f172a;
+            border-top: 1px solid #1e293b;
+            z-index: 90;
+            transition: height 0.2s ease;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .logs-header-bar {
+            background: #1e293b;
+            padding: 8px 24px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            color: #f8fafc;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #334155;
+        }
+
+        .logs-controls {
+            display: flex;
+            gap: 8px;
+        }
+
+        .logs-btn {
+            background: #334155;
+            border: none;
+            color: #f8fafc;
+            font-family: inherit;
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .logs-btn:hover {
+            background: #475569;
+        }
+
+        .logs-container {
+            flex: 1;
+            padding: 12px 24px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #34d399;
+            line-height: 1.5;
+        }
+
+        .toast-banner {
+            padding: 10px 16px;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            margin-bottom: 15px;
+            display: none;
+            animation: fadeIn 0.3s ease;
+            border: 1px solid transparent;
+        }
+
+        .toast-error { background: #fee2e2; border-color: #fecaca; color: #991b1b; }
+        .toast-success { background: #d1fae5; border-color: #a7f3d0; color: #065f46; }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(5, 150, 105, 0.2);
+            border-top: 4px solid var(--primary);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+    </style>
+</head>
+<body>
+    <div class="ambient-glow glow-top-left"></div>
+    <div class="ambient-glow glow-bottom-right"></div>
+
+    <!-- Navigation Header -->
+    <header>
+        <div class="logo-section">
+            <div class="logo-icon">N</div>
+            <div class="logo-title">Kotak Neo Bridge</div>
+        </div>
+
+        <!-- Live Spot rates -->
+        <div class="tickers-container" style="display: none;" id="header-tickers">
+            <div class="ticker-box">
+                <span class="ticker-label">NIFTY Spot</span>
+                <span class="ticker-val" id="nifty-val">--</span>
+            </div>
+            <div class="ticker-box">
+                <span class="ticker-label">BANKNIFTY Spot</span>
+                <span class="ticker-val" id="banknifty-val">--</span>
+            </div>
+            <div class="ticker-box">
+                <span class="ticker-label">SENSEX Spot</span>
+                <span class="ticker-val" id="sensex-val">--</span>
+            </div>
+        </div>
+
+        <div class="main-tabs">
+            <button id="login-tab-btn" class="tab-trigger active" onclick="switchPane('login-pane')">Login</button>
+            <button id="strategy-tab-btn" class="tab-trigger" onclick="switchPane('strategy-pane')">Strategies</button>
+        </div>
+
+        <div class="header-meta">
+            <div id="live-clock">--:--:--</div>
+        </div>
+    </header>
+
+    <!-- Preparing Data Pop-up Overlay modal -->
+    <div class="modal-overlay" id="loading-overlay" style="display: none;">
+        <div class="modal-content">
+            <div class="spinner"></div>
+            <h3 style="margin-bottom: 8px;">Preparing Data</h3>
+            <p style="color: var(--text-muted); font-size: 0.85rem;">Caching scrip masters from broker. This might take up to 20-30 seconds on first login. Please stand by...</p>
+        </div>
+    </div>
+
+    <!-- Main Workspace -->
+    <main>
+        <div id="status-banner" class="toast-banner"></div>
+
+        <!-- 1. LOGIN PANE -->
+        <div id="login-pane" class="tab-pane active">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; max-width: 1000px; margin: 40px auto;">
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Kotak Neo Credentials</h2>
+                    </div>
+                    <form id="credentials-form">
+                        <div class="form-group">
+                            <label for="consumer_key">Consumer Key</label>
+                            <input type="text" id="consumer_key" class="form-control" required>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="mobile_number">Mobile Number</label>
+                                <input type="text" id="mobile_number" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="ucc">UCC Code</label>
+                                <input type="text" id="ucc" class="form-control" required>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="mpin">6-Digit MPIN</label>
+                            <input type="password" id="mpin" class="form-control" required>
+                        </div>
+                        <div class="form-group">
+                            <label id="totp-label" for="totp_code">TOTP Code</label>
+                            <input type="text" id="totp_code" class="form-control" placeholder="Leave blank for auto-TOTP">
+                        </div>
+                        <button type="submit" id="auth-submit-btn" class="btn">Establish Connection</button>
+                    </form>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>System Session Overview</h2>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 15px; margin-top: 10px;">
+                        <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
+                            <span style="color: var(--text-muted);">Bridge Connectivity</span>
+                            <span id="bridge-status-val" style="color: var(--error); font-weight: 700;">DISCONNECTED</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
+                            <span style="color: var(--text-muted);">Client Name</span>
+                            <span id="client-name-val">-</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; border-bottom: 1px solid var(--border-color); padding-bottom: 8px;">
+                            <span style="color: var(--text-muted);">UCC</span>
+                            <span id="ucc-val">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 2. STRATEGIES WORKSPACE -->
+        <div id="strategy-pane" class="tab-pane">
+            <div id="lock-warning" style="text-align: center; padding: 60px 20px;">
+                <div style="font-size: 3rem; margin-bottom: 20px; color: var(--error);">🔒</div>
+                <h3>Authentication Required</h3>
+                <p style="color: var(--text-muted); margin-bottom: 15px;">Please connect to Kotak Neo first.</p>
+                <button class="btn" style="max-width: 200px; margin: 0 auto;" onclick="switchPane('login-pane')">Go to Login</button>
+            </div>
+
+            <div id="strategy-workspace" class="workspace-content" style="display: none;">
+                
+                <!-- Saved Strategies Panel (Now Top & Symmetrical) -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <div>
+                            <h2>Saved Strategies</h2>
+                            <p>Select, Edit, or Deploy your custom strategy models</p>
+                        </div>
+                        <button class="btn" style="width: auto;" onclick="openNewStrategyForm()">+ Design Strategy</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="custom-table">
+                            <thead>
+                                <tr>
+                                    <th>Strategy Name</th>
+                                    <th>Times (In/Out)</th>
+                                    <th>Mode</th>
+                                    <th>Product Type</th>
+                                    <th>Legs Configured</th>
+                                    <th>Status</th>
+                                    <th style="text-align: right;">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="saved-strats-table-body">
+                                <tr>
+                                    <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No saved strategies found. Click "+ Design Strategy" to create one.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Creator Form Panel (Dynamically shown when adding/editing) -->
+                <div class="panel" id="strategy-form-panel" style="display: none;">
+                    <div class="panel-header">
+                        <h2 id="form-title">Strategy Configuration</h2>
+                        <button class="btn btn-secondary" style="width: auto; padding: 6px 14px;" onclick="closeStrategyForm()">Cancel</button>
+                    </div>
+                    <form id="strategy-creation-form">
+                        <input type="hidden" id="edit-strat-id">
+                        
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="strat_name">Strategy Name</label>
+                                <input type="text" id="strat_name" class="form-control" required placeholder="E.g., Morning Strangle">
+                            </div>
+                            <div class="form-group">
+                                <label for="strat_inst">Instrument</label>
+                                <select id="strat_inst" class="form-control">
+                                    <option value="Nifty">Nifty</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="strat_entry">Entry Time</label>
+                                <input type="time" id="strat_entry" class="form-control" required>
+                            </div>
+                            <div class="form-group">
+                                <label for="strat_exit">Exit Time</label>
+                                <input type="time" id="strat_exit" class="form-control" required>
+                            </div>
+                        </div>
+
+                        <div class="form-row">
+                            <div class="form-group" style="flex:1;">
+                                <label for="strat_product">Product Type</label>
+                                <select id="strat_product" class="form-control">
+                                    <option value="MIS">MIS (Intraday)</option>
+                                    <option value="NRML">NRML (Normal)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label for="strat_source">Underlying Source</label>
+                                <select id="strat_source" class="form-control">
+                                    <option value="Spot">Spot Index</option>
+                                    <option value="Future">Future Contract</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1;">
+                                <label for="strat_type">Trade Mode</label>
+                                <select id="strat_type" class="form-control">
+                                    <option value="Paper">Paper Trade (Simulated)</option>
+                                    <option value="Real">Real Trade (Live broker orders)</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="flex:1.2;">
+                                <label for="strat_mp_val">Market Protection</label>
+                                <div style="display:flex; gap:6px;">
+                                    <input type="number" step="any" id="strat_mp_val" class="form-control" value="2" min="0.05" placeholder="e.g. 2" style="flex:1;">
+                                    <select id="strat_mp_type" class="form-control" style="width:115px; flex-shrink:0;">
+                                        <option value="Percentage">Percent (%)</option>
+                                        <option value="Points">Points (Pts)</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="legs-header">
+                            <h3 style="font-size: 0.95rem; font-weight: 700;">Strategy Legs</h3>
+                            <button type="button" class="btn btn-secondary" style="width: auto; padding: 4px 10px; font-size: 0.75rem;" onclick="addLegFormRow()">+ Add Leg</button>
+                        </div>
+
+                        <div id="legs-container">
+                            <!-- Dynamic leg cards go here -->
+                        </div>
+
+                        <button type="submit" class="btn" style="margin-top: 15px;">Save Strategy & Register</button>
+                    </form>
+                </div>
+
+                <!-- Live Dashboard: Active Deployed Strategies -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Live / Active Deployed Strategies</h2>
+                        <p>Real-time execution status of active runs</p>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="custom-table">
+                            <thead>
+                                <tr>
+                                    <th>Strategy Info</th>
+                                    <th>Execution Mode</th>
+                                    <th>Live PnL</th>
+                                    <th>Legs & Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="active-strats-tbody">
+                                <tr>
+                                    <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 20px;">No active deployed strategies.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Positions & Orders Panel -->
+                <div class="panel">
+                    <div class="panel-header">
+                        <h2>Orders, Positions & PnL Tracker</h2>
+                    </div>
+                    
+                    <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 10px; margin-bottom: 6px;">
+                        <h3 id="positions-header-title" style="font-size: 0.9rem; color: var(--text-muted); margin: 0;">Active Positions</h3>
+                        <span id="positions-status-badge" class="badge badge-active" style="display:none; font-size:0.65rem;">LIVE</span>
+                    </div>
+                    <div class="table-responsive" style="margin-bottom: 20px;">
+                        <table class="custom-table">
+                            <thead>
+                                <tr>
+                                    <th>Symbol</th>
+                                    <th>Quantity</th>
+                                    <th id="pos-th-avg">Avg Price</th>
+                                    <th>Current Price</th>
+                                    <th id="pos-th-pnl">Live PnL</th>
+                                </tr>
+                            </thead>
+                            <tbody id="positions-tbody">
+                                <tr>
+                                    <td colspan="5" style="text-align: center; color: var(--text-muted); padding: 15px;">No open positions.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <h3 style="font-size: 0.9rem; margin-bottom: 6px; color: var(--text-muted);">Execution Orders Book</h3>
+                    <div class="table-responsive">
+                        <table class="custom-table">
+                            <thead>
+                                <tr>
+                                    <th>Time</th>
+                                    <th>Strategy</th>
+                                    <th>Symbol</th>
+                                    <th>Trade Type</th>
+                                    <th>Quantity</th>
+                                    <th>Price</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody id="orders-tbody">
+                                <tr>
+                                    <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 15px;">No orders recorded.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+
+    <!-- Collapsible logs drawer with height controllers -->
+    <div class="logs-drawer" id="logs-drawer" style="height: 40px;">
+        <div class="logs-header-bar" onclick="toggleLogsDrawer()">
+            <span>APPLICATION EVENT LOGS</span>
+            <div class="logs-controls" onclick="event.stopPropagation();">
+                <button class="logs-btn" onclick="resizeLogs(40)">Min</button>
+                <button class="logs-btn" onclick="resizeLogs(300)">Med</button>
+                <button class="logs-btn" onclick="resizeLogs(600)">Max</button>
+            </div>
+        </div>
+        <div class="logs-container" id="logs-container-body">
+            <!-- App event logs streamed here -->
+        </div>
+    </div>
+
+    <script>
+        let isConnected = false;
+        let activePaneId = 'login-pane';
+        let expiryDates = [];
+        let lotSize = 65; // dynamic default fallback
+        let dashboardInterval = null;
+        let drawerHeight = 40;
+
+        // Ticker rates
+        function updateClock() {
+            const clockEl = document.getElementById('live-clock');
+            const now = new Date();
+            const dateStr = now.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            clockEl.textContent = `${dateStr} | ${timeStr}`;
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        function switchPane(paneId) {
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab-trigger').forEach(t => t.classList.remove('active'));
+            
+            document.getElementById(paneId).classList.add('active');
+            activePaneId = paneId;
+
+            if (paneId === 'login-pane') {
+                document.getElementById('login-tab-btn').classList.add('active');
+            } else {
+                document.getElementById('strategy-tab-btn').classList.add('active');
+            }
+        }
+
+        function toggleLogsDrawer() {
+            if (drawerHeight === 40) {
+                resizeLogs(300);
+            } else {
+                resizeLogs(40);
+            }
+        }
+
+        function resizeLogs(height) {
+            drawerHeight = height;
+            document.getElementById('logs-drawer').style.height = `${height}px`;
+        }
+
+        // Show Toast Notifications
+        function showBanner(text, isError = true) {
+            const banner = document.getElementById('status-banner');
+            banner.textContent = text;
+            banner.className = `toast-banner ${isError ? 'toast-error' : 'toast-success'}`;
+            banner.style.display = 'block';
+            setTimeout(() => { banner.style.display = 'none'; }, 5000);
+        }
+
+        // Fetch Saved Config Prefills
+        async function fetchConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.consumer_key) document.getElementById('consumer_key').value = data.consumer_key;
+                    if (data.mobile_number) document.getElementById('mobile_number').value = data.mobile_number;
+                    if (data.ucc) document.getElementById('ucc').value = data.ucc;
+                    if (data.mpin) document.getElementById('mpin').value = data.mpin;
+                    if (data.has_totp_secret) {
+                        document.getElementById('totp-label').innerHTML = 'TOTP Code <span style="color: var(--primary); font-size: 0.65rem;">(Auto-generating)</span>';
+                        document.getElementById('totp_code').placeholder = 'Auto-generating via Secret...';
+                    }
+                }
+            } catch (err) {
+                console.error("Config fetch error:", err);
+            }
+        }
+        fetchConfig();
+
+        // Login Handler
+        const credentialsForm = document.getElementById('credentials-form');
+        credentialsForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const submitBtn = document.getElementById('auth-submit-btn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Connecting...';
+
+            const payload = {
+                consumer_key: document.getElementById('consumer_key').value,
+                mobile_number: document.getElementById('mobile_number').value,
+                ucc: document.getElementById('ucc').value,
+                mpin: document.getElementById('mpin').value,
+                totp_code: document.getElementById('totp_code').value
+            };
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showBanner("Connected successfully!", false);
+                    document.getElementById('bridge-status-val').textContent = 'CONNECTED';
+                    document.getElementById('bridge-status-val').style.color = 'var(--primary)';
+                    document.getElementById('client-name-val').textContent = data.client_name;
+                    document.getElementById('ucc-val').textContent = payload.ucc;
+
+                    // Show loader overlay while scrips are caching
+                    document.getElementById('loading-overlay').style.display = 'flex';
+                    pollScripStatus();
+                } else {
+                    throw new Error(data.error || "Authentication failed");
+                }
+            } catch (err) {
+                showBanner(err.message, true);
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Establish Connection';
+            }
+        });
+
+        // Poll Scrip Caching Master state
+        function pollScripStatus() {
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/scrip-status');
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.status === 'ready') {
+                            clearInterval(interval);
+                            document.getElementById('loading-overlay').style.display = 'none';
+                            onSessionReady();
+                        } else if (data.status === 'error') {
+                            clearInterval(interval);
+                            document.getElementById('loading-overlay').style.display = 'none';
+                            showBanner(`Scrip master error: ${data.error}`, true);
+                        }
+                    }
+                } catch (err) {
+                    console.error("Scrip polling error:", err);
+                }
+            }, 2000);
+        }
+
+        async function onSessionReady() {
+            isConnected = true;
+            document.getElementById('lock-warning').style.display = 'none';
+            document.getElementById('strategy-workspace').style.display = 'flex';
+            document.getElementById('header-tickers').style.display = 'flex';
+            
+            // Prefetch expiries
+            await loadExpiries();
+            
+            // Render Saved strategies
+            loadSavedStrategies();
+
+            // Switch to strategies screen
+            switchPane('strategy-pane');
+
+            // Start Live Dashboard Updates Poller
+            if (dashboardInterval) clearInterval(dashboardInterval);
+            dashboardInterval = setInterval(updateDashboardLoop, 2000);
+            updateDashboardLoop();
+        }
+
+        async function loadExpiries() {
+            try {
+                const res = await fetch('/api/options/expiry');
+                if (res.ok) {
+                    const data = await res.json();
+                    expiryDates = data.expiries;
+                    lotSize = data.lot_size || 65;
+                }
+            } catch (err) {
+                console.error("Expiries lookup failed:", err);
+            }
+        }
+
+        // Dashboard Live Polling Loop
+        async function updateDashboardLoop() {
+            try {
+                const res = await fetch('/api/dashboard-updates');
+                if (!res.ok) return;
+                const data = await res.json();
+
+                // 1. Update spot index tickers
+                document.getElementById('nifty-val').textContent = data.spot_rates.nifty ? data.spot_rates.nifty.toFixed(2) : '--';
+                document.getElementById('banknifty-val').textContent = data.spot_rates.banknifty ? data.spot_rates.banknifty.toFixed(2) : '--';
+                document.getElementById('sensex-val').textContent = data.spot_rates.sensex ? data.spot_rates.sensex.toFixed(2) : '--';
+
+                // 2. Render logs
+                const logsBody = document.getElementById('logs-container-body');
+                const lastScrollTop = logsBody.scrollTop;
+                const lastScrollHeight = logsBody.scrollHeight;
+                const isScrolledToBottom = (lastScrollHeight - logsBody.clientHeight - lastScrollTop) < 20;
+                
+                logsBody.innerHTML = data.logs.map(l => `<div>${l}</div>`).join('');
+                if (isScrolledToBottom || lastScrollTop === 0) {
+                    logsBody.scrollTop = logsBody.scrollHeight;
+                }
+
+                // 3. Render Saved strategies table updates
+                localStrats = data.deployed_statuses.map(s => {
+                    const found = localStrats.find(x => x.id === s.id);
+                    if (found) {
+                        found.status = s.status;
+                    }
+                    return found;
+                }).filter(Boolean);
+                renderSavedStrategiesTable();
+
+                // 4. Render Active / Warming Up Deployed strategies
+                const activeTbody = document.getElementById('active-strats-tbody');
+                activeTbody.innerHTML = '';
+                
+                const activeItems = data.deployed_statuses.filter(s => s.status === 'Active' || s.status === 'Deployed' || s.status === 'Warming Up');
+                if (activeItems.length === 0) {
+                    activeTbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 15px;">No active deployed strategies.</td></tr>';
+                } else {
+                    activeItems.forEach(item => {
+                        let detailsHtml = '';
+                        if (item.details) {
+                            detailsHtml = item.details.legs.map(leg => {
+                                const badgeColor = leg.status === 'Active' ? 'var(--primary)' : 'var(--text-muted)';
+                                return `<div style="font-size: 0.75rem;">${leg.symbol} (${leg.position}) Entry: ₹${leg.entry_price} LTP: ₹${leg.current_price || leg.entry_price} [ <strong style="color: ${badgeColor};">${leg.status}</strong> ]</div>`;
+                            }).join('');
+                        } else if (item.status === 'Warming Up') {
+                            detailsHtml = '<span class="badge badge-warmup" style="font-size:0.75rem;">⚡ Algo Warmup (T-20s): Staging strikes & connecting live feeds</span>';
+                        } else {
+                            detailsHtml = '<span style="color: var(--text-muted);">Awaiting trigger time...</span>';
+                        }
+
+                        const pnlColor = item.live_pnl >= 0 ? 'var(--primary)' : 'var(--error)';
+                        const pnlText = item.live_pnl >= 0 ? `+₹${item.live_pnl}` : `-₹${Math.abs(item.live_pnl)}`;
+
+                        let statusBadge = `<span class="badge" style="background:#f1f5f9; border: 1px solid var(--border-color);">${getStrategyModeById(item.id)}</span>`;
+                        if (item.status === 'Warming Up') {
+                            statusBadge += ` <span class="badge badge-warmup" style="font-size:0.65rem;">WARMING UP</span>`;
+                        }
+
+                        activeTbody.innerHTML += `
+                            <tr>
+                                <td><strong>${getStrategyNameById(item.id)}</strong></td>
+                                <td>${statusBadge}</td>
+                                <td><strong style="color: ${pnlColor}; font-size: 1rem;">${pnlText}</strong></td>
+                                <td>${detailsHtml}</td>
+                                <td><button class="btn btn-danger" style="padding: 4px 10px; width:auto; font-size:0.75rem;" onclick="stopStrategy('${item.id}')">Stop / Sq Off</button></td>
+                            </tr>
+                        `;
+                    });
+                }
+
+                // 5. Render Positions (Planned vs Active)
+                const posTbody = document.getElementById('positions-tbody');
+                const posHeaderTitle = document.getElementById('positions-header-title');
+                const posStatusBadge = document.getElementById('positions-status-badge');
+                const posThAvg = document.getElementById('pos-th-avg');
+                const posThPnl = document.getElementById('pos-th-pnl');
+
+                posTbody.innerHTML = '';
+                const openPos = data.positions.filter(p => p.qty !== 0);
+                const plannedPos = data.planned_positions || [];
+
+                if (openPos.length > 0) {
+                    // Active Positions Mode
+                    if (posHeaderTitle) posHeaderTitle.textContent = "Active Positions";
+                    if (posStatusBadge) {
+                        posStatusBadge.style.display = "inline-block";
+                        posStatusBadge.className = "badge badge-active";
+                        posStatusBadge.textContent = "LIVE";
+                    }
+                    if (posThAvg) posThAvg.textContent = "Avg Price";
+                    if (posThPnl) posThPnl.textContent = "Live PnL";
+
+                    openPos.forEach(p => {
+                        const pnlColor = p.pnl >= 0 ? 'var(--primary)' : 'var(--error)';
+                        const pnlText = p.pnl >= 0 ? `+₹${p.pnl.toFixed(2)}` : `-₹${Math.abs(p.pnl).toFixed(2)}`;
+                        posTbody.innerHTML += `
+                            <tr>
+                                <td><strong>${p.symbol}</strong></td>
+                                <td>${p.qty}</td>
+                                <td>₹${p.avg_price.toFixed(2)}</td>
+                                <td>₹${p.current_price.toFixed(2)}</td>
+                                <td><strong style="color:${pnlColor};">${pnlText}</strong></td>
+                            </tr>
+                        `;
+                    });
+                } else if (plannedPos.length > 0) {
+                    // Warmup Planned Positions Mode
+                    if (posHeaderTitle) posHeaderTitle.textContent = "Planned Positions (Staging for Entry)";
+                    if (posStatusBadge) {
+                        posStatusBadge.style.display = "inline-block";
+                        posStatusBadge.className = "badge badge-warmup";
+                        posStatusBadge.textContent = "⚡ WARMUP (T-20s)";
+                    }
+                    if (posThAvg) posThAvg.textContent = "Est Entry Price";
+                    if (posThPnl) posThPnl.textContent = "Staging Status";
+
+                    plannedPos.forEach(p => {
+                        posTbody.innerHTML += `
+                            <tr style="background: rgba(255, 247, 237, 0.4);">
+                                <td><strong>${p.symbol}</strong> <span style="font-size:0.7rem; color:var(--text-muted);">(${p.strategy_name})</span></td>
+                                <td><span class="badge" style="background:#f1f5f9;">${p.qty > 0 ? '+'+p.qty : p.qty} (${p.position_type})</span></td>
+                                <td>₹${(p.avg_price || 0).toFixed(2)}</td>
+                                <td>₹${(p.current_price || 0).toFixed(2)}</td>
+                                <td><span class="badge badge-warmup" style="font-size:0.7rem;">⚡ Staged (Ready to Fire)</span></td>
+                            </tr>
+                        `;
+                    });
+                } else {
+                    // Empty Positions Mode
+                    if (posHeaderTitle) posHeaderTitle.textContent = "Active Positions";
+                    if (posStatusBadge) posStatusBadge.style.display = "none";
+                    if (posThAvg) posThAvg.textContent = "Avg Price";
+                    if (posThPnl) posThPnl.textContent = "Live PnL";
+                    posTbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-muted); padding: 15px;">No open positions.</td></tr>';
+                }
+
+                // 6. Render Orders
+                const ordTbody = document.getElementById('orders-tbody');
+                ordTbody.innerHTML = '';
+                if (data.orders.length === 0) {
+                    ordTbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 15px;">No orders recorded.</td></tr>';
+                } else {
+                    data.orders.forEach(o => {
+                        let badgeBg = '#f1f5f9';
+                        let badgeColor = 'var(--text-color)';
+                        let badgeBorder = 'var(--border-color)';
+
+                        if (o.status.includes('Pending')) {
+                            badgeBg = '#eff6ff';
+                            badgeColor = '#1d4ed8';
+                            badgeBorder = '#bfdbfe';
+                        } else if (o.status.includes('Executed') || o.status === 'Simulated Executed') {
+                            badgeBg = '#ecfdf5';
+                            badgeColor = '#047857';
+                            badgeBorder = '#a7f3d0';
+                        } else if (o.status.includes('Cancelled')) {
+                            badgeBg = '#fffbeb';
+                            badgeColor = '#b45309';
+                            badgeBorder = '#fde68a';
+                        } else if (o.status.includes('Failed')) {
+                            badgeBg = '#fef2f2';
+                            badgeColor = '#b91c1c';
+                            badgeBorder = '#fecaca';
+                        }
+
+                        ordTbody.innerHTML += `
+                            <tr>
+                                <td>${o.time}</td>
+                                <td>${o.strategy_name}</td>
+                                <td><strong>${o.symbol}</strong></td>
+                                <td>${o.type}</td>
+                                <td>${o.qty}</td>
+                                <td>₹${o.price.toFixed(2)}</td>
+                                <td><span class="badge" style="background:${badgeBg}; color:${badgeColor}; border:1px solid ${badgeBorder};">${o.status}</span></td>
+                            </tr>
+                        `;
+                    });
+                }
+
+            } catch (err) {
+                console.error("Dashboard updates failure:", err);
+            }
+        }
+
+        // Helper Strategy Lookup cache
+        let localStrats = [];
+
+        function getStrategyNameById(id) {
+            const s = localStrats.find(x => x.id === id);
+            return s ? s.name : 'Unknown';
+        }
+        function getStrategyModeById(id) {
+            const s = localStrats.find(x => x.id === id);
+            return s ? `${s.trade_type} (${s.product_type})` : '-';
+        }
+
+        // Saved Strategies Panel rendering
+        function renderSavedStrategiesTable() {
+            const tbody = document.getElementById('saved-strats-table-body');
+            tbody.innerHTML = '';
+            if (localStrats.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 20px;">No saved strategies found. Click "+ Design Strategy" to create one.</td></tr>';
+                return;
+            }
+
+            localStrats.forEach(strat => {
+                let badgeClass = 'badge-inactive';
+                if (strat.status === 'Deployed') badgeClass = 'badge-deployed';
+                if (strat.status === 'Warming Up') badgeClass = 'badge-warmup';
+                if (strat.status === 'Active') badgeClass = 'badge-active';
+                if (strat.status === 'Completed') badgeClass = 'badge-completed';
+
+                const actionBtn = (strat.status === 'Deployed' || strat.status === 'Warming Up' || strat.status === 'Active')
+                    ? `<button class="btn btn-danger" style="padding:4px 8px; width:auto; font-size:0.75rem;" onclick="stopStrategy('${strat.id}')">Stop</button>`
+                    : `<button class="btn" style="padding:4px 8px; width:auto; font-size:0.75rem;" onclick="deployStrategy('${strat.id}')">Deploy</button>`;
+
+                const legsText = strat.legs.map(l => {
+                    const sDesc = l.strike_criteria === 'Closest Premium' 
+                        ? `Prem: ₹${l.closest_premium || l.strike_value || 50}` 
+                        : (l.strike_type || l.strike_value || l.strike_criteria || 'ATM');
+                    return `${l.option_type} (${l.position}, Lots: ${l.lots}, ${sDesc})`;
+                }).join(', ');
+
+                const mpText = `<span class="badge" style="background:#e0f2fe; color:#0369a1; border:1px solid #bae6fd; font-size:0.65rem; margin-left:4px;" title="Market Protection">MP: ${strat.market_protection_value !== undefined ? strat.market_protection_value : 2}${strat.market_protection_type === 'Points' ? ' Pts' : '%'}</span>`;
+
+                tbody.innerHTML += `
+                    <tr>
+                        <td><strong>${strat.name}</strong></td>
+                        <td>${strat.entry_time} - ${strat.exit_time}</td>
+                        <td><span class="badge" style="background:#f1f5f9; border: 1px solid var(--border-color);">${strat.trade_type}</span>${mpText}</td>
+                        <td>${strat.product_type}</td>
+                        <td style="font-size:0.75rem; color:var(--text-muted); max-width: 300px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${legsText}</td>
+                        <td><span class="badge ${badgeClass}">${strat.status}</span></td>
+                        <td>
+                            <div style="display:flex; gap:8px; justify-content:flex-end;">
+                                <button class="btn btn-secondary" style="padding:4px 8px; width:auto; font-size:0.75rem;" onclick="editStrategy('${strat.id}')">Edit</button>
+                                <button class="btn btn-danger" style="padding:4px 8px; width:auto; font-size:0.75rem;" onclick="deleteStrategy('${strat.id}')">Delete</button>
+                                ${actionBtn}
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            });
+        }
+
+        async function loadSavedStrategies() {
+            try {
+                const res = await fetch('/api/strategies');
+                if (res.ok) {
+                    const data = await res.json();
+                    localStrats = data.strategies;
+                    renderSavedStrategiesTable();
+                }
+            } catch (err) {
+                console.error("Saved strategies retrieval failed:", err);
+            }
+        }
+
+        async function deployStrategy(id) {
+            try {
+                const res = await fetch(`/api/deploy/${id}`, { method: 'POST' });
+                if (res.ok) {
+                    showBanner("Strategy deployed successfully!", false);
+                    loadSavedStrategies();
+                } else {
+                    const data = await res.json();
+                    throw new Error(data.error);
+                }
+            } catch (err) {
+                showBanner(err.message, true);
+            }
+        }
+
+        async function stopStrategy(id) {
+            try {
+                const res = await fetch(`/api/stop/${id}`, { method: 'POST' });
+                if (res.ok) {
+                    showBanner("Strategy execution stopped / squared off.", false);
+                    loadSavedStrategies();
+                } else {
+                    const data = await res.json();
+                    throw new Error(data.error);
+                }
+            } catch (err) {
+                showBanner(err.message, true);
+            }
+        }
+
+        async function deleteStrategy(id) {
+            if (!confirm("Are you sure you want to delete this strategy?")) return;
+            try {
+                const res = await fetch(`/api/strategies/${id}`, { method: 'DELETE' });
+                if (res.ok) {
+                    showBanner("Strategy deleted.", false);
+                    loadSavedStrategies();
+                    closeStrategyForm();
+                } else {
+                    const data = await res.json();
+                    throw new Error(data.error);
+                }
+            } catch (err) {
+                showBanner(err.message, true);
+            }
+        }
+
+        // Form Workspace toggles
+        function openNewStrategyForm() {
+            document.getElementById('strategy-form-panel').style.display = 'block';
+            document.getElementById('form-title').textContent = "Design New Strategy";
+            document.getElementById('edit-strat-id').value = '';
+            document.getElementById('strategy-creation-form').reset();
+            document.getElementById('strat_mp_val').value = '2';
+            document.getElementById('strat_mp_type').value = 'Percentage';
+            document.getElementById('legs-container').innerHTML = '';
+            
+            // Add a default leg
+            addLegFormRow();
+            
+            // Scroll to form panel
+            document.getElementById('strategy-form-panel').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function closeStrategyForm() {
+            document.getElementById('strategy-form-panel').style.display = 'none';
+        }
+
+        let legCounter = 0;
+        function addLegFormRow(prefilled = null) {
+            legCounter++;
+            const container = document.getElementById('legs-container');
+            const legId = `leg_row_${legCounter}`;
+
+            const card = document.createElement('div');
+            card.className = 'leg-card';
+            card.id = legId;
+
+            // Generate Expiry options
+            const expiryOptions = expiryDates.map(exp => 
+                `<option value="${exp}" ${prefilled && prefilled.expiry === exp ? 'selected' : ''}>${exp}</option>`
+            ).join('');
+
+            // Resolve prefilled SL & Target types
+            let slType = 'None';
+            let slVal = 0;
+            if (prefilled && prefilled.stop_loss > 0) {
+                slType = prefilled.stop_loss_type || 'Points';
+                slVal = prefilled.stop_loss;
+            }
+
+            let tgtType = 'None';
+            let tgtVal = 0;
+            if (prefilled && prefilled.target > 0) {
+                tgtType = prefilled.target_type || 'Points';
+                tgtVal = prefilled.target;
+            }
+
+            card.innerHTML = `
+                <div class="leg-card-header">
+                    <span style="font-size:0.75rem; font-weight:700; color:var(--primary);">Leg #${legCounter}</span>
+                    <button type="button" class="btn btn-danger" style="padding:2px 8px; width:auto; font-size:0.65rem;" onclick="removeLegRow('${legId}')">Remove Leg</button>
+                </div>
+                
+                <!-- ROW 1: Option Contract Setup -->
+                <div class="form-row">
+                    <div class="form-group" style="flex:1;">
+                        <label>Option Type</label>
+                        <select class="form-control leg-option-type">
+                            <option value="CE" ${prefilled && prefilled.option_type === 'CE' ? 'selected' : ''}>CE</option>
+                            <option value="PE" ${prefilled && prefilled.option_type === 'PE' ? 'selected' : ''}>PE</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1.5;">
+                        <label>Expiry Date</label>
+                        <select class="form-control leg-expiry">
+                            <option value="">Select Expiry</option>
+                            ${expiryOptions}
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1.5;">
+                        <label>Lots (Dynamic Qty)</label>
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <input type="number" class="form-control leg-lots" value="${prefilled ? prefilled.lots : 1}" min="1" oninput="calculateTotalQty(this)">
+                            <span class="total-qty-bracket" style="font-size:0.75rem; color:var(--text-muted); font-family:monospace; min-width:65px;">(Qty: ${lotSize})</span>
+                        </div>
+                    </div>
+                    <div class="form-group" style="flex:1;">
+                        <label>Position</label>
+                        <select class="form-control leg-position">
+                            <option value="Sell" ${prefilled && prefilled.position === 'Sell' ? 'selected' : ''}>Sell</option>
+                            <option value="Buy" ${prefilled && prefilled.position === 'Buy' ? 'selected' : ''}>Buy</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- ROW 2: Strike & Risk Management -->
+                <div class="form-row" style="margin-top:12px;">
+                    <div class="form-group" style="flex:1.2;">
+                        <label>Strike Criteria</label>
+                        <select class="form-control leg-strike-criteria" onchange="onStrikeCriteriaChange(this)">
+                            <option value="Strike Type" ${prefilled && (prefilled.strike_criteria === 'Strike Type' || !prefilled.strike_criteria || prefilled.strike_criteria.startsWith('ITM') || prefilled.strike_criteria.startsWith('OTM') || prefilled.strike_criteria === 'ATM') ? 'selected' : ''}>Strike Type</option>
+                            <option value="Closest Premium" ${prefilled && prefilled.strike_criteria === 'Closest Premium' ? 'selected' : ''}>Closest Premium</option>
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex:1.2;">
+                        <label class="strike-value-label">${prefilled && prefilled.strike_criteria === 'Closest Premium' ? 'Premium' : 'Strike Type'}</label>
+                        <div class="strike-value-container">
+                            ${(prefilled && prefilled.strike_criteria === 'Closest Premium') ? `
+                                <input type="number" step="any" class="form-control leg-strike-val" value="${prefilled.closest_premium || prefilled.strike_value || 50}" min="0.05" placeholder="e.g. 50">
+                            ` : `
+                                <select class="form-control leg-strike-val">
+                                    <option value="ITM6" ${prefilled && (prefilled.strike_type === 'ITM6' || prefilled.strike_criteria === 'ITM6') ? 'selected' : ''}>ITM6</option>
+                                    <option value="ITM5" ${prefilled && (prefilled.strike_type === 'ITM5' || prefilled.strike_criteria === 'ITM5') ? 'selected' : ''}>ITM5</option>
+                                    <option value="ITM4" ${prefilled && (prefilled.strike_type === 'ITM4' || prefilled.strike_criteria === 'ITM4') ? 'selected' : ''}>ITM4</option>
+                                    <option value="ITM3" ${prefilled && (prefilled.strike_type === 'ITM3' || prefilled.strike_criteria === 'ITM3') ? 'selected' : ''}>ITM3</option>
+                                    <option value="ITM2" ${prefilled && (prefilled.strike_type === 'ITM2' || prefilled.strike_criteria === 'ITM2') ? 'selected' : ''}>ITM2</option>
+                                    <option value="ITM1" ${prefilled && (prefilled.strike_type === 'ITM1' || prefilled.strike_criteria === 'ITM1') ? 'selected' : ''}>ITM1</option>
+                                    <option value="ATM" ${!prefilled || prefilled.strike_type === 'ATM' || prefilled.strike_criteria === 'ATM' ? 'selected' : ''}>ATM</option>
+                                    <option value="OTM1" ${prefilled && (prefilled.strike_type === 'OTM1' || prefilled.strike_criteria === 'OTM1') ? 'selected' : ''}>OTM1</option>
+                                    <option value="OTM2" ${prefilled && (prefilled.strike_type === 'OTM2' || prefilled.strike_criteria === 'OTM2') ? 'selected' : ''}>OTM2</option>
+                                    <option value="OTM3" ${prefilled && (prefilled.strike_type === 'OTM3' || prefilled.strike_criteria === 'OTM3') ? 'selected' : ''}>OTM3</option>
+                                    <option value="OTM4" ${prefilled && (prefilled.strike_type === 'OTM4' || prefilled.strike_criteria === 'OTM4') ? 'selected' : ''}>OTM4</option>
+                                    <option value="OTM5" ${prefilled && (prefilled.strike_type === 'OTM5' || prefilled.strike_criteria === 'OTM5') ? 'selected' : ''}>OTM5</option>
+                                    <option value="OTM6" ${prefilled && (prefilled.strike_type === 'OTM6' || prefilled.strike_criteria === 'OTM6') ? 'selected' : ''}>OTM6</option>
+                                </select>
+                            `}
+                        </div>
+                    </div>
+                    <div class="form-group" style="flex:1.4;">
+                        <label>Stop Loss</label>
+                        <div style="display:flex; gap:6px;">
+                            <select class="form-control leg-sl-type" style="width:110px; flex-shrink:0;" onchange="onSlTypeChange(this)">
+                                <option value="None" ${slType === 'None' ? 'selected' : ''}>None</option>
+                                <option value="Points" ${slType === 'Points' ? 'selected' : ''}>Points</option>
+                                <option value="Percentage" ${slType === 'Percentage' ? 'selected' : ''}>Percentage</option>
+                            </select>
+                            <input type="number" step="any" class="form-control leg-sl-val" value="${slVal > 0 ? slVal : ''}" placeholder="${slType === 'None' ? 'Disabled' : (slType === 'Points' ? 'e.g. 10 Pts' : 'e.g. 15 %')}" ${slType === 'None' ? 'disabled style="background:#f8fafc; opacity:0.65;"' : 'style="background:#ffffff; opacity:1;"'}>
+                        </div>
+                    </div>
+                    <div class="form-group" style="flex:1.4;">
+                        <label>Target (Take Profit)</label>
+                        <div style="display:flex; gap:6px;">
+                            <select class="form-control leg-tgt-type" style="width:110px; flex-shrink:0;" onchange="onTgtTypeChange(this)">
+                                <option value="None" ${tgtType === 'None' ? 'selected' : ''}>None</option>
+                                <option value="Points" ${tgtType === 'Points' ? 'selected' : ''}>Points</option>
+                                <option value="Percentage" ${tgtType === 'Percentage' ? 'selected' : ''}>Percentage</option>
+                            </select>
+                            <input type="number" step="any" class="form-control leg-tgt-val" value="${tgtVal > 0 ? tgtVal : ''}" placeholder="${tgtType === 'None' ? 'Disabled' : (tgtType === 'Points' ? 'e.g. 20 Pts' : 'e.g. 25 %')}" ${tgtType === 'None' ? 'disabled style="background:#f8fafc; opacity:0.65;"' : 'style="background:#ffffff; opacity:1;"'}>
+                        </div>
+                    </div>
+                </div>
+            `;
+            container.appendChild(card);
+            
+            // Initialize quantity bracket
+            const lotsInput = card.querySelector('.leg-lots');
+            calculateTotalQty(lotsInput);
+        }
+
+        function onSlTypeChange(selectElem) {
+            const card = selectElem.closest('.leg-card');
+            const input = card.querySelector('.leg-sl-val');
+            const val = selectElem.value;
+            if (val === 'None') {
+                input.disabled = true;
+                input.value = '';
+                input.placeholder = 'Disabled';
+                input.style.background = '#f8fafc';
+                input.style.opacity = '0.65';
+            } else if (val === 'Points') {
+                input.disabled = false;
+                input.placeholder = 'e.g. 10 Pts';
+                input.style.background = '#ffffff';
+                input.style.opacity = '1';
+            } else if (val === 'Percentage') {
+                input.disabled = false;
+                input.placeholder = 'e.g. 15 %';
+                input.style.background = '#ffffff';
+                input.style.opacity = '1';
+            }
+        }
+
+        function onTgtTypeChange(selectElem) {
+            const card = selectElem.closest('.leg-card');
+            const input = card.querySelector('.leg-tgt-val');
+            const val = selectElem.value;
+            if (val === 'None') {
+                input.disabled = true;
+                input.value = '';
+                input.placeholder = 'Disabled';
+                input.style.background = '#f8fafc';
+                input.style.opacity = '0.65';
+            } else if (val === 'Points') {
+                input.disabled = false;
+                input.placeholder = 'e.g. 20 Pts';
+                input.style.background = '#ffffff';
+                input.style.opacity = '1';
+            } else if (val === 'Percentage') {
+                input.disabled = false;
+                input.placeholder = 'e.g. 25 %';
+                input.style.background = '#ffffff';
+                input.style.opacity = '1';
+            }
+        }
+
+        function onStrikeCriteriaChange(selectElem) {
+            const card = selectElem.closest('.leg-card');
+            const criteria = selectElem.value;
+            const valueContainer = card.querySelector('.strike-value-container');
+            const valueLabel = card.querySelector('.strike-value-label');
+            
+            if (criteria === 'Closest Premium') {
+                valueLabel.textContent = 'Premium';
+                valueContainer.innerHTML = `
+                    <input type="number" step="any" class="form-control leg-strike-val" value="50" min="0.05" placeholder="e.g. 50">
+                `;
+            } else {
+                valueLabel.textContent = 'Strike Type';
+                valueContainer.innerHTML = `
+                    <select class="form-control leg-strike-val">
+                        <option value="ITM6">ITM6</option>
+                        <option value="ITM5">ITM5</option>
+                        <option value="ITM4">ITM4</option>
+                        <option value="ITM3">ITM3</option>
+                        <option value="ITM2">ITM2</option>
+                        <option value="ITM1">ITM1</option>
+                        <option value="ATM" selected>ATM</option>
+                        <option value="OTM1">OTM1</option>
+                        <option value="OTM2">OTM2</option>
+                        <option value="OTM3">OTM3</option>
+                        <option value="OTM4">OTM4</option>
+                        <option value="OTM5">OTM5</option>
+                        <option value="OTM6">OTM6</option>
+                    </select>
+                `;
+            }
+        }
+
+        function calculateTotalQty(input) {
+            const lots = parseInt(input.value) || 0;
+            const card = input.closest('.leg-card');
+            const bracket = card.querySelector('.total-qty-bracket');
+            const qty = lots * lotSize;
+            bracket.textContent = `(Qty: ${qty})`;
+        }
+
+        function removeLegRow(id) {
+            const row = document.getElementById(id);
+            if (row) row.remove();
+        }
+
+        // Form Submit -> Save Strategy
+        const stratForm = document.getElementById('strategy-creation-form');
+        stratForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const name = document.getElementById('strat_name').value;
+            const editId = document.getElementById('edit-strat-id').value;
+            const entryTime = document.getElementById('strat_entry').value;
+            const exitTime = document.getElementById('strat_exit').value;
+
+            // Check 1: Exit time > Entry time
+            if (exitTime <= entryTime) {
+                showBanner("Exit Time must be later than Entry Time.", true);
+                return;
+            }
+            
+            // Gather legs
+            const legCards = document.querySelectorAll('#legs-container .leg-card');
+            const legs = [];
+            let validationFailed = false;
+
+            legCards.forEach(card => {
+                const expiry = card.querySelector('.leg-expiry').value;
+                if (!expiry) {
+                    showBanner("Please select Expiry date for all legs.", true);
+                    validationFailed = true;
+                    return;
+                }
+                
+                const criteria = card.querySelector('.leg-strike-criteria').value;
+                const valElem = card.querySelector('.leg-strike-val');
+                const strikeVal = valElem ? valElem.value : 'ATM';
+
+                const slType = card.querySelector('.leg-sl-type').value;
+                const slInput = card.querySelector('.leg-sl-val');
+                const slVal = slType !== 'None' ? (parseFloat(slInput.value) || 0) : 0;
+
+                const tgtType = card.querySelector('.leg-tgt-type').value;
+                const tgtInput = card.querySelector('.leg-tgt-val');
+                const tgtVal = tgtType !== 'None' ? (parseFloat(tgtInput.value) || 0) : 0;
+
+                legs.push({
+                    option_type: card.querySelector('.leg-option-type').value,
+                    expiry: expiry,
+                    lots: parseInt(card.querySelector('.leg-lots').value) || 1,
+                    position: card.querySelector('.leg-position').value,
+                    strike_criteria: criteria,
+                    strike_type: criteria === 'Strike Type' ? strikeVal : 'ATM',
+                    closest_premium: criteria === 'Closest Premium' ? parseFloat(strikeVal) || 50.0 : 0,
+                    strike_value: strikeVal,
+                    stop_loss: slVal,
+                    stop_loss_type: slType,
+                    target: tgtVal,
+                    target_type: tgtType
+                });
+            });
+
+            if (validationFailed) return;
+            if (legs.length === 0) {
+                showBanner("Please add at least 1 leg to the strategy.", true);
+                return;
+            }
+
+            const payload = {
+                id: editId || undefined,
+                name: name,
+                instrument: document.getElementById('strat_inst').value,
+                entry_time: entryTime,
+                exit_time: exitTime,
+                product_type: document.getElementById('strat_product').value,
+                underlying_source: document.getElementById('strat_source').value,
+                trade_type: document.getElementById('strat_type').value,
+                market_protection_value: parseFloat(document.getElementById('strat_mp_val').value) || 2.0,
+                market_protection_type: document.getElementById('strat_mp_type').value || 'Percentage',
+                legs: legs
+            };
+
+            try {
+                const res = await fetch('/api/strategies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    showBanner("Strategy saved successfully!", false);
+                    closeStrategyForm();
+                    loadSavedStrategies();
+                } else {
+                    throw new Error(data.error || "Failed to save strategy");
+                }
+            } catch (err) {
+                showBanner(err.message, true);
+            }
+        });
+
+        // Edit Strategy Click
+        function editStrategy(id) {
+            const strat = localStrats.find(x => x.id === id);
+            if (!strat) return;
+
+            document.getElementById('strategy-form-panel').style.display = 'block';
+            document.getElementById('form-title').textContent = `Modify Strategy: ${strat.name}`;
+            document.getElementById('edit-strat-id').value = strat.id;
+            
+            document.getElementById('strat_name').value = strat.name;
+            document.getElementById('strat_inst').value = strat.instrument || 'Nifty';
+            document.getElementById('strat_entry').value = strat.entry_time;
+            document.getElementById('strat_exit').value = strat.exit_time;
+            document.getElementById('strat_product').value = strat.product_type;
+            document.getElementById('strat_source').value = strat.underlying_source;
+            document.getElementById('strat_type').value = strat.trade_type;
+            document.getElementById('strat_mp_val').value = strat.market_protection_value !== undefined ? strat.market_protection_value : 2.0;
+            document.getElementById('strat_mp_type').value = strat.market_protection_type || 'Percentage';
+
+            const container = document.getElementById('legs-container');
+            container.innerHTML = '';
+            legCounter = 0;
+
+            strat.legs.forEach(leg => {
+                addLegFormRow(leg);
+            });
+
+            // Scroll to form panel
+            document.getElementById('strategy-form-panel').scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html>
