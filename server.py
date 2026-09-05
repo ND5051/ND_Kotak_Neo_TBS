@@ -107,30 +107,111 @@ def fetch_real_time_ltp(exchange, token):
         add_app_log(f"Error fetching quotes for {token} ({exchange}): {e}")
     return None
 
-# Fetch actual execution fill details from broker order history
-def get_order_execution_details(order_id):
+# Fetch actual execution fill details from broker (queries order_report and order_history)
+def get_order_execution_details(order_id, max_retries=3, delay_sec=0.5):
     global client_instance
     if client_instance is None or not order_id:
         return None
-    try:
-        res = client_instance.order_history(order_id=str(order_id))
-        if isinstance(res, dict) and "data" in res:
-            inner = res["data"]
-            order_list = inner.get("data") if isinstance(inner, dict) else (inner if isinstance(inner, list) else None)
-            if order_list and isinstance(order_list, list) and len(order_list) > 0:
-                latest = order_list[-1]
-                status = latest.get("ordSt", "").lower()
-                avg_prc_raw = latest.get("avgPrc")
-                avg_price = float(avg_prc_raw) if avg_prc_raw and float(avg_prc_raw) > 0 else None
-                rej_rsn = latest.get("rejRsn", "")
-                return {
-                    "status": status,
-                    "avg_price": avg_price,
-                    "rej_reason": rej_rsn,
-                    "raw": latest
-                }
-    except Exception as e:
-        add_app_log(f"Error checking order history for {order_id}: {e}")
+
+    for attempt in range(max_retries):
+        if attempt > 0:
+            time.sleep(delay_sec)
+        try:
+            # 1. First try order_report(order_id)
+            res = None
+            try:
+                res = client_instance.order_report(order_id=str(order_id))
+            except Exception as ex_rep:
+                add_app_log(f"order_report lookup notice for {order_id}: {ex_rep}")
+
+            record = None
+            if isinstance(res, dict):
+                data_field = res.get("data")
+                if isinstance(data_field, list) and len(data_field) > 0:
+                    record = data_field[-1]
+                elif isinstance(data_field, dict):
+                    inner_data = data_field.get("data")
+                    if isinstance(inner_data, list) and len(inner_data) > 0:
+                        record = inner_data[-1]
+                    else:
+                        record = data_field
+            elif isinstance(res, list) and len(res) > 0:
+                record = res[-1]
+
+            # 2. Fallback to order_history if order_report didn't yield a record
+            if not record:
+                h_res = client_instance.order_history(order_id=str(order_id))
+                if isinstance(h_res, dict):
+                    data_field = h_res.get("data")
+                    if isinstance(data_field, list) and len(data_field) > 0:
+                        record = data_field[-1]
+                    elif isinstance(data_field, dict):
+                        inner_data = data_field.get("data")
+                        if isinstance(inner_data, list) and len(inner_data) > 0:
+                            record = inner_data[-1]
+                        else:
+                            record = data_field
+
+            if record and isinstance(record, dict):
+                raw_st = str(record.get("ordSt") or record.get("status") or record.get("orderStatus") or "").lower()
+                rej_rsn = (
+                    record.get("rejRsn") or 
+                    record.get("rejectReason") or 
+                    record.get("cancelRejectReason") or 
+                    record.get("errMsg") or 
+                    record.get("text") or 
+                    ""
+                )
+                avg_prc_raw = record.get("avgPrc") or record.get("trdPr") or record.get("price")
+                avg_price = None
+                try:
+                    if avg_prc_raw and float(avg_prc_raw) > 0:
+                        avg_price = float(avg_prc_raw)
+                except (ValueError, TypeError):
+                    avg_price = None
+
+                filled_qty = 0
+                try:
+                    filled_qty = int(float(record.get("fldQty") or record.get("filledQuantity") or 0))
+                except (ValueError, TypeError):
+                    filled_qty = 0
+
+                # Check terminal statuses
+                is_rejected = any(s in raw_st for s in ["reject", "rej", "cancelled", "canc", "failed"])
+                is_complete = any(s in raw_st for s in ["complete", "traded", "filled"]) or (filled_qty > 0 and not is_rejected)
+
+                add_app_log(f"Broker order check ({order_id}, attempt {attempt+1}): status='{raw_st}', filled_qty={filled_qty}, avg_price={avg_price}, rej_rsn='{rej_rsn}'")
+
+                if is_rejected:
+                    return {
+                        "status": "rejected",
+                        "raw_status": raw_st,
+                        "avg_price": None,
+                        "filled_qty": 0,
+                        "rej_reason": rej_rsn or "Order rejected by broker/exchange",
+                        "raw": record
+                    }
+                elif is_complete:
+                    return {
+                        "status": "complete",
+                        "raw_status": raw_st,
+                        "avg_price": avg_price,
+                        "filled_qty": filled_qty,
+                        "rej_reason": "",
+                        "raw": record
+                    }
+                elif raw_st in ["open", "trigger_pending", "trigger pending", "pending", "validation pending"]:
+                    return {
+                        "status": "open",
+                        "raw_status": raw_st,
+                        "avg_price": avg_price,
+                        "filled_qty": filled_qty,
+                        "rej_reason": "",
+                        "raw": record
+                    }
+        except Exception as e:
+            add_app_log(f"Error checking order execution details for {order_id}: {e}")
+
     return None
 
 # Calculate Limit price with Market Protection buffer
@@ -639,33 +720,44 @@ def trigger_strategy_entry(strat):
                     transaction_type="B" if leg["position"] == "Buy" else "S"
                 )
                 
-                # Check for broker success
+                # Check for broker acceptance
                 ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
                 if ord_no:
                     entry_order_id = str(ord_no)
-                    add_app_log(f"Real Entry Order Submitted ({entry_order_id}) limit {formatted_entry_limit} (LTP: {entry_price:.2f}). Checking fill...")
+                    add_app_log(f"Real Entry Order Submitted ({entry_order_id}) limit {formatted_entry_limit} (LTP: {entry_price:.2f}). Checking execution status with broker...")
                     
-                    # Check execution status and fetch exact fill price
-                    time.sleep(0.5) # Brief pause for exchange processing
-                    details = get_order_execution_details(entry_order_id)
+                    # Verify execution status from broker
+                    details = get_order_execution_details(entry_order_id, max_retries=4, delay_sec=0.5)
                     if details:
-                        if details.get("status") in ["rejected", "cancelled"]:
-                            order_status = f"Failed (Broker: {details.get('rej_reason') or details.get('status')})"
+                        if details.get("status") == "rejected":
+                            order_status = f"Failed (Broker Rejected: {details.get('rej_reason')})"
                             entry_success = False
-                            add_app_log(f"Entry order {entry_order_id} was {details.get('status')}: {details.get('rej_reason')}")
-                        else:
+                            add_app_log(f"Entry order {entry_order_id} REJECTED by broker: {details.get('rej_reason')}")
+                        elif details.get("status") == "complete":
                             if details.get("avg_price"):
                                 entry_price = details["avg_price"]
                                 add_app_log(f"Confirmed Executed Fill Price for {entry_order_id}: ₹{entry_price:.2f}")
                             order_status = "Executed"
+                            entry_success = True
+                        elif details.get("status") == "open":
+                            order_status = "Pending (Open on Broker)"
+                            # Order is open/unfilled in the market book, do NOT place SL yet
+                            entry_success = False
+                            add_app_log(f"Entry order {entry_order_id} is still OPEN on broker book. Waiting for complete fill before SL placement.")
+                        else:
+                            order_status = f"Status Unknown ({details.get('raw_status')})"
+                            entry_success = False
                     else:
-                        order_status = "Executed"
+                        # Could not confirm fill, treat as unconfirmed/failed to prevent rogue SL
+                        order_status = "Failed (Unconfirmed by Broker)"
+                        entry_success = False
+                        add_app_log(f"Warning: Could not confirm execution for entry order {entry_order_id}. Halting secondary orders.")
                 else:
                     err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
                     entry_order_id = f"ERR_{int(time.time()*1000)}"
                     order_status = f"Failed (Broker: {err_text})"
                     entry_success = False
-                    add_app_log(f"Real Entry Order Rejected by Broker: {response}")
+                    add_app_log(f"Real Entry Order Rejected on placement: {response}")
             except Exception as e:
                 add_app_log(f"Real Entry Order Placement Exception: {e}")
                 entry_order_id = f"ERR_{int(time.time()*1000)}"
@@ -686,11 +778,12 @@ def trigger_strategy_entry(strat):
             "status": order_status
         })
 
+        # STRICT GUARD: If primary entry did not execute completely, skip SL, Target, and Position registration
         if not entry_success:
-            add_app_log(f"Primary Entry order failed for leg #{idx+1} ({symbol}). Skipping SL and Target placement.")
+            add_app_log(f"Primary Entry order not filled for leg #{idx+1} ({symbol}). Status: '{order_status}'. Skipping SL, Target, and Position creation.")
             continue
 
-        # Calculate and Place Stop Loss Order (SL Limit)
+        # Calculate and Place Stop Loss Order (SL Limit) based on actual entry_price
         sl_price = 0.0
         sl_order_id = None
         sl_val = float(leg.get("stop_loss", 0))
@@ -832,7 +925,7 @@ def trigger_strategy_entry(strat):
                 "status": tgt_status
             })
 
-        # Record position
+        # Record position ONLY after confirmed entry fill
         pos_record = {
             "strategy_id": strat_id,
             "leg_idx": idx,
@@ -864,8 +957,14 @@ def trigger_strategy_entry(strat):
             "status": "Active" # Active, Target Hit, SL Hit, Squared Off
         })
 
-    strat["status"] = "Active"
-    active_deployments[strat_id] = deployment
+    # Only activate strategy if at least one leg executed successfully
+    if len(deployment["legs"]) > 0:
+        strat["status"] = "Active"
+        active_deployments[strat_id] = deployment
+        add_app_log(f"✓ Strategy {strat['name']} is now Active ({len(deployment['legs'])} legs active).")
+    else:
+        strat["status"] = "Failed"
+        add_app_log(f"✕ Strategy {strat['name']} failed: No legs were filled.")
     save_strategies_to_disk()
     add_app_log(f"✓ Strategy {strat['name']} is now Active & monitored.")
 
@@ -1003,8 +1102,18 @@ def square_off_leg(strat, leg, exit_price, reason):
         if leg.get("tgt_order_id"):
             cancel_pending_order(mode, leg["tgt_order_id"], f"OCO - {reason}")
 
-        # 2. Place Limit exit order with market protection
-        order_status = "Simulated"
+        # 2. Check if an active filled position actually exists
+        has_active_pos = any(
+            p["strategy_id"] == strat["id"] and p["symbol"] == leg["symbol"] and p["qty"] != 0
+            for p in positions
+        )
+
+        if not has_active_pos:
+            add_app_log(f"Skipping square-off order for leg {leg['symbol']}: No active position found.")
+            return
+
+        # Place Limit exit order with market protection
+        order_status = "Simulated Executed"
         mp_val = float(strat.get("market_protection_value", 2.0))
         mp_type = strat.get("market_protection_type", "Percentage")
         exit_txn_type = "S" if leg["position"] == "Buy" else "B"
@@ -1027,8 +1136,23 @@ def square_off_leg(strat, leg, exit_price, reason):
                 ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
                 if ord_no:
                     exit_order_id = str(ord_no)
-                    order_status = "Executed"
-                    add_app_log(f"Real Square-off Limit Order Placed ({exit_order_id}) at {formatted_exit_limit} (LTP: {exit_price:.2f}): {response}")
+                    add_app_log(f"Real Square-off Limit Order Submitted ({exit_order_id}) at {formatted_exit_limit} (LTP: {exit_price:.2f}). Checking broker execution...")
+                    
+                    # Verify exit order execution status with broker
+                    exit_details = get_order_execution_details(exit_order_id, max_retries=4, delay_sec=0.5)
+                    if exit_details:
+                        if exit_details.get("status") == "rejected":
+                            order_status = f"Failed (Broker Rejected: {exit_details.get('rej_reason')})"
+                            add_app_log(f"Real Square-off Order {exit_order_id} REJECTED: {exit_details.get('rej_reason')}")
+                        elif exit_details.get("status") == "complete":
+                            if exit_details.get("avg_price"):
+                                exit_price = exit_details["avg_price"]
+                            order_status = "Executed"
+                            add_app_log(f"Real Square-off Order {exit_order_id} Executed at ₹{exit_price:.2f}")
+                        else:
+                            order_status = f"Pending ({exit_details.get('raw_status')})"
+                    else:
+                        order_status = "Executed"
                 else:
                     err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
                     order_status = f"Failed (Broker: {err_text})"
@@ -1047,7 +1171,7 @@ def square_off_leg(strat, leg, exit_price, reason):
             "qty": leg["qty"],
             "price": exit_price,
             "mode": mode,
-            "status": f"{order_status} ({reason})"
+            "status": f"{order_status} ({reason})" if not order_status.startswith("Failed") else order_status
         })
     
     # Zero out position
