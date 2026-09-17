@@ -1346,9 +1346,21 @@ def get_option_expiries():
         return jsonify({"success": False, "error": "Scrip master loading in progress..."}), 400
 
     try:
+        today_ist = get_now_ist().date()
         expiry_set = set(x.get('pExpiryDate') for x in cached_nifty_options if x.get('pExpiryDate'))
+        
+        # Filter for active and future expiries only (>= today)
+        active_expiries = []
+        for exp in expiry_set:
+            try:
+                exp_date = datetime.strptime(exp, "%d%b%Y").date()
+                if exp_date >= today_ist:
+                    active_expiries.append(exp)
+            except Exception:
+                active_expiries.append(exp)
+
         sorted_expiries = sorted(
-            list(expiry_set), 
+            active_expiries, 
             key=lambda d: datetime.strptime(d, "%d%b%Y")
         )
         
