@@ -6,7 +6,14 @@ import json
 import threading
 import asyncio
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify, send_from_directory
+
+# Timezone helper for Indian Standard Time (IST)
+IST_TZ = ZoneInfo("Asia/Kolkata")
+
+def get_now_ist():
+    return datetime.now(IST_TZ)
 
 # Add SDK path to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -59,7 +66,7 @@ subscription_queue = []
 schedules_lock = threading.Lock()
 
 def add_app_log(message):
-    timestamp = datetime.now().strftime("%H:%M:%S")
+    timestamp = get_now_ist().strftime("%H:%M:%S")
     formatted = f"[{timestamp}] {message}"
     print(formatted)
     with app_logs_lock:
@@ -192,7 +199,7 @@ def find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type)
     return fallback, 0.0
 
 # Fetch actual execution fill details from broker (queries order_report and order_history)
-def get_order_execution_details(order_id, max_retries=3, delay_sec=0.5):
+def get_order_execution_details(order_id, max_retries=10, delay_sec=1.0):
     global client_instance
     if client_instance is None or not order_id:
         return None
@@ -460,7 +467,7 @@ def run_strategy_scheduler():
             if client_instance is None:
                 continue
                 
-            now_dt = datetime.now()
+            now_dt = get_now_ist()
             now_str = now_dt.strftime("%H:%M")
             now_secs = now_dt.strftime("%H:%M:%S")
             
@@ -475,7 +482,7 @@ def run_strategy_scheduler():
 
                     try:
                         entry_time_obj = datetime.strptime(entry_time_str, "%H:%M").time()
-                        today_entry_dt = datetime.combine(now_dt.date(), entry_time_obj)
+                        today_entry_dt = datetime.combine(now_dt.date(), entry_time_obj, tzinfo=IST_TZ)
                         secs_until_entry = (today_entry_dt - now_dt).total_seconds()
                     except Exception:
                         secs_until_entry = 9999
@@ -485,13 +492,13 @@ def run_strategy_scheduler():
                         if strat_id not in warmup_stages:
                             warmup_strategy(strat)
 
-                    # 2. Trigger Entry at entry_time (when secs_until_entry <= 0 or now_str == entry_time_str)
-                    if (status in ["Deployed", "Warming Up"]) and (secs_until_entry <= 0 or now_str == entry_time_str) and strat_id not in active_deployments:
+                    # 2. Trigger Entry at entry_time (when secs_until_entry <= 0 or now_str >= entry_time_str)
+                    if (status in ["Deployed", "Warming Up"]) and (secs_until_entry <= 0 or now_str >= entry_time_str) and strat_id not in active_deployments:
                         trigger_strategy_entry(strat)
                         
                     # 3. Check Active Deployed state (SL / Target / Exit Time)
                     if strat_id in active_deployments:
-                        monitor_active_deployment(strat, now_str, now_secs)
+                        monitor_active_deployment(strat, now_dt, now_str, now_secs)
                         
         except Exception as e:
             print(f"Error in strategy scheduler loop: {e}")
@@ -763,8 +770,8 @@ def trigger_strategy_entry(strat):
                     entry_order_id = str(ord_no)
                     add_app_log(f"Real Entry Order Submitted ({entry_order_id}) limit {formatted_entry_limit} (LTP: {entry_price:.2f}). Checking execution status with broker...")
                     
-                    # Verify execution status from broker
-                    details = get_order_execution_details(entry_order_id, max_retries=4, delay_sec=0.5)
+                    # Verify execution status from broker (poll up to 10s with 1.0s interval for market fills)
+                    details = get_order_execution_details(entry_order_id, max_retries=10, delay_sec=1.0)
                     if details:
                         if details.get("status") == "rejected":
                             order_status = f"Failed (Broker Rejected: {details.get('rej_reason')})"
@@ -1021,16 +1028,25 @@ def cancel_pending_order(mode, order_id, reason):
             ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Cancelled ({reason})"
             add_app_log(f"Order {order_id} marked as Cancelled ({reason}).")
 
-def monitor_active_deployment(strat, now_str, now_secs):
+def monitor_active_deployment(strat, now_dt, now_str, now_secs):
     global active_deployments, ltp_cache, positions, orders_log
     strat_id = strat["id"]
     deploy = active_deployments[strat_id]
     
-    # Check Exit Time Square-off
+    # Check Exit Time Square-off (using IST time comparison)
     time_exit = False
-    if now_str == strat["exit_time"]:
-        time_exit = True
-        add_app_log(f"Exit time reached for {strat['name']}. Triggering OCO square-off & cancellation.")
+    exit_time_str = strat.get("exit_time", "")
+    if exit_time_str:
+        try:
+            exit_time_obj = datetime.strptime(exit_time_str, "%H:%M").time()
+            today_exit_dt = datetime.combine(now_dt.date(), exit_time_obj, tzinfo=IST_TZ)
+            if now_dt >= today_exit_dt:
+                time_exit = True
+                add_app_log(f"⏰ Exit time ({exit_time_str}) reached for {strat['name']}. Triggering full square-off & order cancellations.")
+        except Exception as ex:
+            if now_str >= exit_time_str:
+                time_exit = True
+                add_app_log(f"⏰ Exit time reached for {strat['name']} (fallback check). Triggering square-off.")
 
     active_legs_count = 0
     mode = strat["trade_type"]
@@ -1107,100 +1123,103 @@ def square_off_leg(strat, leg, exit_price, reason):
     leg["status"] = reason
     leg["exit_price"] = exit_price
     mode = strat["trade_type"]
-    add_app_log(f"Executing exit for leg {leg['symbol']} (Reason: {reason}) at {exit_price}")
+    add_app_log(f"Executing exit for leg {leg['symbol']} (Reason: {reason}) at ₹{exit_price:.2f}")
     
+    # 1. Cancel remaining/opposite pending orders via OCO
     if reason == "SL Hit":
-        # 1. Update SL order to Executed
+        if leg.get("tgt_order_id"):
+            cancel_pending_order(mode, leg["tgt_order_id"], "OCO - SL Hit")
         if leg.get("sl_order_id"):
             for ord_item in orders_log:
                 if ord_item.get("order_id") == leg["sl_order_id"]:
                     ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Executed (SL Hit)"
                     ord_item["price"] = exit_price
-        # 2. Cancel opposite pending Target order via OCO
-        if leg.get("tgt_order_id"):
-            cancel_pending_order(mode, leg["tgt_order_id"], "OCO - SL Hit")
-
     elif reason == "Target Hit":
-        # 1. Update Target order to Executed
+        if leg.get("sl_order_id"):
+            cancel_pending_order(mode, leg["sl_order_id"], "OCO - Target Hit")
         if leg.get("tgt_order_id"):
             for ord_item in orders_log:
                 if ord_item.get("order_id") == leg["tgt_order_id"]:
                     ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Executed (Target Hit)"
                     ord_item["price"] = exit_price
-        # 2. Cancel opposite pending SL order via OCO
-        if leg.get("sl_order_id"):
-            cancel_pending_order(mode, leg["sl_order_id"], "OCO - Target Hit")
-
     else:
-        # Time Exit or Manual Stop:
-        # 1. Cancel pending SL and Target orders via OCO
+        # Time Exit or Manual Stop
         if leg.get("sl_order_id"):
             cancel_pending_order(mode, leg["sl_order_id"], f"OCO - {reason}")
         if leg.get("tgt_order_id"):
             cancel_pending_order(mode, leg["tgt_order_id"], f"OCO - {reason}")
 
-        # 2. Check if an active filled position actually exists
-        has_active_pos = any(
-            p["strategy_id"] == strat["id"] and p["symbol"] == leg["symbol"] and p["qty"] != 0
-            for p in positions
-        )
+    # 2. Check if an active filled position actually exists
+    has_active_pos = any(
+        p["strategy_id"] == strat["id"] and p["symbol"] == leg["symbol"] and p["qty"] != 0
+        for p in positions
+    )
 
-        if not has_active_pos:
-            add_app_log(f"Skipping square-off order for leg {leg['symbol']}: No active position found.")
-            return
+    if not has_active_pos:
+        add_app_log(f"Skipping square-off order for leg {leg['symbol']}: No active position found.")
+        return
 
-        # Place Limit exit order with market protection
-        order_status = "Simulated Executed"
-        mp_val = float(strat.get("market_protection_value", 2.0))
-        mp_type = strat.get("market_protection_type", "Percentage")
-        exit_txn_type = "S" if leg["position"] == "Buy" else "B"
-        sq_limit_price = apply_market_protection(exit_price, exit_txn_type, mp_val, mp_type)
-        formatted_exit_limit = f"{sq_limit_price:.2f}"
+    # If broker SL order was already submitted and reason is SL Hit, broker SL order itself closes position
+    # Otherwise, submit a Limit/Market Protection square-off order
+    need_broker_exit = True
+    if reason == "SL Hit" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+        # Broker-side SL was already active at exchange
+        need_broker_exit = False
+        add_app_log(f"Broker-side SL order {leg['sl_order_id']} handled square-off for {leg['symbol']}.")
 
-        exit_order_id = f"SIM_EXIT_{int(time.time()*1000)}"
-        if mode == "Real":
-            try:
-                response = client_instance.place_order(
-                    exchange_segment="nse_fo",
-                    product=strat["product_type"],
-                    price=formatted_exit_limit, # Limit price with protection buffer
-                    order_type="L",
-                    quantity=str(leg["qty"]),
-                    validity="DAY",
-                    trading_symbol=leg["symbol"],
-                    transaction_type=exit_txn_type
-                )
-                ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
-                if ord_no:
-                    exit_order_id = str(ord_no)
-                    add_app_log(f"Real Square-off Limit Order Submitted ({exit_order_id}) at {formatted_exit_limit} (LTP: {exit_price:.2f}). Checking broker execution...")
-                    
-                    # Verify exit order execution status with broker
-                    exit_details = get_order_execution_details(exit_order_id, max_retries=4, delay_sec=0.5)
-                    if exit_details:
-                        if exit_details.get("status") == "rejected":
-                            order_status = f"Failed (Broker Rejected: {exit_details.get('rej_reason')})"
-                            add_app_log(f"Real Square-off Order {exit_order_id} REJECTED: {exit_details.get('rej_reason')}")
-                        elif exit_details.get("status") == "complete":
-                            if exit_details.get("avg_price"):
-                                exit_price = exit_details["avg_price"]
-                            order_status = "Executed"
-                            add_app_log(f"Real Square-off Order {exit_order_id} Executed at ₹{exit_price:.2f}")
-                        else:
-                            order_status = f"Pending ({exit_details.get('raw_status')})"
-                    else:
-                        order_status = "Executed"
-                else:
-                    err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
-                    order_status = f"Failed (Broker: {err_text})"
-                    add_app_log(f"Real Square-off Order Rejected: {response}")
-            except Exception as e:
-                add_app_log(f"Real Squareoff Exception: {e}")
-                order_status = f"Failed ({str(e)})"
+    # Place Limit exit order with market protection
+    order_status = "Simulated Executed"
+    mp_val = float(strat.get("market_protection_value", 2.0))
+    mp_type = strat.get("market_protection_type", "Percentage")
+    exit_txn_type = "S" if leg["position"] == "Buy" else "B"
+    sq_limit_price = apply_market_protection(exit_price, exit_txn_type, mp_val, mp_type)
+    formatted_exit_limit = f"{sq_limit_price:.2f}"
+
+    exit_order_id = f"SIM_EXIT_{int(time.time()*1000)}"
+    if mode == "Real" and need_broker_exit:
+        try:
+            response = client_instance.place_order(
+                exchange_segment="nse_fo",
+                product=strat["product_type"],
+                price=formatted_exit_limit, # Limit price with protection buffer
+                order_type="L",
+                quantity=str(leg["qty"]),
+                validity="DAY",
+                trading_symbol=leg["symbol"],
+                transaction_type=exit_txn_type
+            )
+            ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
+            if ord_no:
+                exit_order_id = str(ord_no)
+                add_app_log(f"Real Square-off Limit Order Submitted ({exit_order_id}) at {formatted_exit_limit} (LTP: {exit_price:.2f}). Checking broker execution...")
                 
+                # Verify exit order execution status with broker
+                exit_details = get_order_execution_details(exit_order_id, max_retries=10, delay_sec=1.0)
+                if exit_details:
+                    if exit_details.get("status") == "rejected":
+                        order_status = f"Failed (Broker Rejected: {exit_details.get('rej_reason')})"
+                        add_app_log(f"Real Square-off Order {exit_order_id} REJECTED: {exit_details.get('rej_reason')}")
+                    elif exit_details.get("status") == "complete":
+                        if exit_details.get("avg_price"):
+                            exit_price = exit_details["avg_price"]
+                        order_status = "Executed"
+                        add_app_log(f"Real Square-off Order {exit_order_id} Executed at ₹{exit_price:.2f}")
+                    else:
+                        order_status = f"Pending ({exit_details.get('raw_status')})"
+                else:
+                    order_status = "Executed"
+            else:
+                err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
+                order_status = f"Failed (Broker: {err_text})"
+                add_app_log(f"Real Square-off Order Rejected: {response}")
+        except Exception as e:
+            add_app_log(f"Real Squareoff Exception: {e}")
+            order_status = f"Failed ({str(e)})"
+
+    if need_broker_exit:
         orders_log.append({
             "order_id": exit_order_id,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "strategy_name": strat["name"],
             "leg_idx": leg["leg_idx"],
             "symbol": leg["symbol"],
@@ -1210,7 +1229,7 @@ def square_off_leg(strat, leg, exit_price, reason):
             "mode": mode,
             "status": f"{order_status} ({reason})" if not order_status.startswith("Failed") else order_status
         })
-    
+
     # Zero out position
     for pos in positions:
         if pos["strategy_id"] == strat["id"] and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
