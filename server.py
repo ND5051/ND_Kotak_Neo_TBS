@@ -96,16 +96,100 @@ def fetch_real_time_ltp(exchange, token):
         return None
     try:
         response = client_instance.quotes(
-            instrument_tokens=[{"instrument_token": token, "exchange_segment": exchange}], 
+            instrument_tokens=[{"instrument_token": str(token), "exchange_segment": exchange}], 
             quote_type="ltp"
         )
-        if response and isinstance(response, list) and len(response) > 0:
-            ltp_val = response[0].get("ltp")
+        items = []
+        if isinstance(response, list):
+            items = response
+        elif isinstance(response, dict):
+            items = response.get("data") or response.get("result") or []
+            if isinstance(items, dict):
+                items = items.get("data") or [items]
+        
+        if items and isinstance(items, list) and len(items) > 0:
+            ltp_val = items[0].get("ltp")
             if ltp_val is not None:
                 return float(ltp_val)
     except Exception as e:
         add_app_log(f"Error fetching quotes for {token} ({exchange}): {e}")
     return None
+
+def find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type):
+    """
+    Finds the contract whose market premium is closest to target_prem.
+    Uses real-time batch quotes with ltp_cache and distance heuristics as fallback.
+    """
+    global client_instance, ltp_cache
+    if not candidates:
+        return None, 0.0
+
+    # Sort candidates so OTM direction is prioritized if candidate pool is large
+    # For CE: strikes >= ATM are OTM. For PE: strikes <= ATM are OTM.
+    if option_type == "CE":
+        sorted_candidates = sorted(candidates, key=lambda s: (float(s.get('dStrikePrice;', 0))/100.0 < atm_strike, abs(float(s.get('dStrikePrice;', 0))/100.0 - atm_strike)))
+    else:
+        sorted_candidates = sorted(candidates, key=lambda s: (float(s.get('dStrikePrice;', 0))/100.0 > atm_strike, abs(float(s.get('dStrikePrice;', 0))/100.0 - atm_strike)))
+
+    # Take the top 30 most relevant candidates
+    pool = sorted_candidates[:30]
+    tokens_req = [{"instrument_token": str(s.get("pSymbol")), "exchange_segment": "nse_fo"} for s in pool]
+    
+    quote_map = {} # token -> ltp
+
+    # 1. Fetch live batch quotes from broker
+    if client_instance:
+        try:
+            quotes_res = client_instance.quotes(instrument_tokens=tokens_req, quote_type="ltp")
+            items = []
+            if isinstance(quotes_res, list):
+                items = quotes_res
+            elif isinstance(quotes_res, dict):
+                items = quotes_res.get("data") or quotes_res.get("result") or []
+                if isinstance(items, dict):
+                    items = items.get("data") or [items]
+
+            if isinstance(items, list):
+                for q in items:
+                    if isinstance(q, dict):
+                        q_tok = str(q.get("exchange_token") or q.get("instrument_token") or "")
+                        q_ltp = float(q.get("ltp") or 0.0)
+                        if q_tok and q_ltp > 0:
+                            quote_map[q_tok] = q_ltp
+        except Exception as e:
+            add_app_log(f"Notice: Quotes API batch fetch error for {option_type}: {e}")
+
+    # 2. Check WebSocket ltp_cache for any tokens missing in quote_map
+    for s in pool:
+        tok = str(s.get("pSymbol"))
+        if tok not in quote_map and tok in ltp_cache:
+            if ltp_cache[tok] > 0:
+                quote_map[tok] = ltp_cache[tok]
+
+    # 3. Find candidate with closest premium
+    best_diff = float("inf")
+    best_scrip = None
+    best_price = 0.0
+
+    for s in pool:
+        tok = str(s.get("pSymbol"))
+        price = quote_map.get(tok)
+        if price is not None and price > 0:
+            diff = abs(price - target_prem)
+            if diff < best_diff:
+                best_diff = diff
+                best_scrip = s
+                best_price = price
+
+    if best_scrip is not None:
+        strike_val = float(best_scrip.get('dStrikePrice;', 0)) / 100.0
+        add_app_log(f"✓ Closest Premium matched: {best_scrip.get('pTrdSymbol')} (Strike: {strike_val}, LTP: ₹{best_price:.2f}, Target: ₹{target_prem:.2f}, Diff: ₹{best_diff:.2f})")
+        return best_scrip, best_price
+
+    # 4. Fallback if no quote received: pick candidate with closest estimated strike
+    fallback = pool[0] if pool else candidates[0]
+    add_app_log(f"⚠️ Quotes unavailable for {option_type} candidates; default fallback to {fallback.get('pTrdSymbol')}")
+    return fallback, 0.0
 
 # Fetch actual execution fill details from broker (queries order_report and order_history)
 def get_order_execution_details(order_id, max_retries=3, delay_sec=0.5):
@@ -452,29 +536,7 @@ def warmup_strategy(strat):
                 s for s in (cached_nifty_options or []) 
                 if s.get('pExpiryDate') == expiry and s.get('pOptionType') == option_type
             ]
-            if candidates:
-                candidates = sorted(candidates, key=lambda s: abs(float(s.get('dStrikePrice;', 0))/100.0 - atm_strike))[:25]
-                tokens_req = [{"instrument_token": str(s.get("pSymbol")), "exchange_segment": "nse_fo"} for s in candidates]
-                best_diff = float("inf")
-                try:
-                    quotes_res = client_instance.quotes(instrument_tokens=tokens_req, quote_type="ltp") if client_instance else None
-                    if isinstance(quotes_res, list):
-                        for q in quotes_res:
-                            q_tok = str(q.get("exchange_token", ""))
-                            q_ltp = float(q.get("ltp") or 0.0)
-                            if q_ltp > 0:
-                                diff = abs(q_ltp - target_prem)
-                                if diff < best_diff:
-                                    best_diff = diff
-                                    for cand in candidates:
-                                        if str(cand.get("pSymbol")) == q_tok:
-                                            matching_scrip = cand
-                                            break
-                except Exception as e:
-                    add_app_log(f"Warmup candidate quotes error: {e}")
-
-                if matching_scrip is None and candidates:
-                    matching_scrip = candidates[0]
+            matching_scrip, _ = find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type)
         else:
             strike_val = str(leg.get("strike_type") or leg.get("strike_criteria") or "ATM").upper()
             offset = 0
@@ -619,35 +681,10 @@ def trigger_strategy_entry(strat):
             if strike_criteria == "Closest Premium":
                 target_prem = float(leg.get("closest_premium") or leg.get("strike_value") or 50.0)
                 candidates = [
-                    s for s in cached_nifty_options 
+                    s for s in (cached_nifty_options or [])
                     if s.get('pExpiryDate') == expiry and s.get('pOptionType') == option_type
                 ]
-                if not candidates:
-                    add_app_log(f"Error: No option contracts available for {option_type} expiry {expiry}")
-                    continue
-                    
-                candidates = sorted(candidates, key=lambda s: abs(float(s.get('dStrikePrice;', 0))/100.0 - atm_strike))[:25]
-                tokens_req = [{"instrument_token": str(s.get("pSymbol")), "exchange_segment": "nse_fo"} for s in candidates]
-                best_diff = float("inf")
-                try:
-                    quotes_res = client_instance.quotes(instrument_tokens=tokens_req, quote_type="ltp")
-                    if isinstance(quotes_res, list):
-                        for q in quotes_res:
-                            q_tok = str(q.get("exchange_token", ""))
-                            q_ltp = float(q.get("ltp") or 0.0)
-                            if q_ltp > 0:
-                                diff = abs(q_ltp - target_prem)
-                                if diff < best_diff:
-                                    best_diff = diff
-                                    for cand in candidates:
-                                        if str(cand.get("pSymbol")) == q_tok:
-                                            matching_scrip = cand
-                                            break
-                except Exception as e:
-                    add_app_log(f"Error querying candidate quotes for Closest Premium: {e}")
-                    
-                if matching_scrip is None:
-                    matching_scrip = candidates[0]
+                matching_scrip, _ = find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type)
             else:
                 strike_val = str(leg.get("strike_type") or leg.get("strike_criteria") or "ATM").upper()
                 offset = 0
