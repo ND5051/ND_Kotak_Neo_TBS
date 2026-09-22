@@ -817,7 +817,7 @@ def trigger_strategy_entry(strat):
         # Record Entry Order log
         orders_log.append({
             "order_id": entry_order_id,
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "strategy_name": strat["name"],
             "leg_idx": idx,
             "symbol": symbol,
@@ -862,9 +862,8 @@ def trigger_strategy_entry(strat):
                 try:
                     sl_txn_type = "S" if leg["position"] == "Buy" else "B"
                     formatted_sl_trigger = f"{sl_price:.2f}"
-                    # Apply market protection to limit price of the SL order
-                    sl_limit_price = apply_market_protection(sl_price, sl_txn_type, mp_val, mp_type)
-                    formatted_sl_limit = f"{sl_limit_price:.2f}"
+                    # For SL orders, Limit price matches trigger price (clean SL at exact configured level without MP buffer)
+                    formatted_sl_limit = f"{sl_price:.2f}"
 
                     sl_res = client_instance.place_order(
                         exchange_segment="nse_fo",
@@ -897,7 +896,7 @@ def trigger_strategy_entry(strat):
 
             orders_log.append({
                 "order_id": sl_order_id,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                 "strategy_name": strat["name"],
                 "leg_idx": idx,
                 "symbol": symbol,
@@ -964,7 +963,7 @@ def trigger_strategy_entry(strat):
 
             orders_log.append({
                 "order_id": tgt_order_id,
-                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                 "strategy_name": strat["name"],
                 "leg_idx": idx,
                 "symbol": symbol,
@@ -1029,10 +1028,12 @@ def cancel_pending_order(mode, order_id, reason):
         except Exception as e:
             add_app_log(f"Cancel real order notice ({order_id}): {e}")
 
+    now_ts = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
     for ord_item in orders_log:
         if ord_item.get("order_id") == order_id and "Pending" in ord_item.get("status", ""):
             ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Cancelled ({reason})"
-            add_app_log(f"Order {order_id} marked as Cancelled ({reason}).")
+            ord_item["time"] = now_ts
+            add_app_log(f"Order {order_id} marked as Cancelled ({reason}) at {now_ts}.")
 
 def monitor_active_deployment(strat, now_dt, now_str, now_secs):
     global active_deployments, ltp_cache, positions, orders_log
@@ -1129,9 +1130,10 @@ def square_off_leg(strat, leg, exit_price, reason):
     leg["status"] = reason
     leg["exit_price"] = exit_price
     mode = strat["trade_type"]
-    add_app_log(f"Executing exit for leg {leg['symbol']} (Reason: {reason}) at ₹{exit_price:.2f}")
+    exit_ts = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    add_app_log(f"Executing exit for leg {leg['symbol']} (Reason: {reason}) at ₹{exit_price:.2f} [{exit_ts}]")
     
-    # 1. Cancel remaining/opposite pending orders via OCO
+    # 1. Cancel remaining/opposite pending orders via OCO and update executed timestamps
     if reason == "SL Hit":
         if leg.get("tgt_order_id"):
             cancel_pending_order(mode, leg["tgt_order_id"], "OCO - SL Hit")
@@ -1140,6 +1142,7 @@ def square_off_leg(strat, leg, exit_price, reason):
                 if ord_item.get("order_id") == leg["sl_order_id"]:
                     ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Executed (SL Hit)"
                     ord_item["price"] = exit_price
+                    ord_item["time"] = exit_ts
     elif reason == "Target Hit":
         if leg.get("sl_order_id"):
             cancel_pending_order(mode, leg["sl_order_id"], "OCO - Target Hit")
@@ -1148,6 +1151,7 @@ def square_off_leg(strat, leg, exit_price, reason):
                 if ord_item.get("order_id") == leg["tgt_order_id"]:
                     ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Executed (Target Hit)"
                     ord_item["price"] = exit_price
+                    ord_item["time"] = exit_ts
     else:
         # Time Exit or Manual Stop
         if leg.get("sl_order_id"):
