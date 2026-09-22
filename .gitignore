@@ -77,3 +77,8 @@ $RECYCLE.BIN/
 ND_Kotak_Neo_CodeBase/
 ND_input_notes.txt
 kotak-neo-python/
+
+# Runtime application and SDK logs
+logs/
+*.log
+*.log.*
