@@ -1346,6 +1346,7 @@
             document.getElementById('strat_mp_val').value = '2';
             document.getElementById('strat_mp_type').value = 'Percentage';
             document.getElementById('legs-container').innerHTML = '';
+            legCounter = 0;
             
             // Add a default leg
             addLegFormRow();
@@ -1359,10 +1360,22 @@
         }
 
         let legCounter = 0;
+
+        function renumberLegs() {
+            const container = document.getElementById('legs-container');
+            const cards = container.querySelectorAll('.leg-card');
+            cards.forEach((card, idx) => {
+                const titleSpan = card.querySelector('.leg-title');
+                if (titleSpan) {
+                    titleSpan.textContent = `Leg #${idx + 1}`;
+                }
+            });
+        }
+
         function addLegFormRow(prefilled = null) {
             legCounter++;
             const container = document.getElementById('legs-container');
-            const legId = `leg_row_${legCounter}`;
+            const legId = `leg_row_${Date.now()}_${legCounter}`;
 
             const card = document.createElement('div');
             card.className = 'leg-card';
@@ -1388,9 +1401,11 @@
                 tgtVal = prefilled.target;
             }
 
+            const currentLegNumber = container.querySelectorAll('.leg-card').length + 1;
+
             card.innerHTML = `
                 <div class="leg-card-header">
-                    <span style="font-size:0.75rem; font-weight:700; color:var(--primary);">Leg #${legCounter}</span>
+                    <span class="leg-title" style="font-size:0.75rem; font-weight:700; color:var(--primary);">Leg #${currentLegNumber}</span>
                     <button type="button" class="btn btn-danger" style="padding:2px 8px; width:auto; font-size:0.65rem;" onclick="removeLegRow('${legId}')">Remove Leg</button>
                 </div>
                 
@@ -1579,7 +1594,10 @@
 
         function removeLegRow(id) {
             const row = document.getElementById(id);
-            if (row) row.remove();
+            if (row) {
+                row.remove();
+                renumberLegs();
+            }
         }
 
         // Form Submit -> Save Strategy
