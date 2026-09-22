@@ -128,6 +128,55 @@ def fetch_real_time_ltp(exchange, token):
         add_app_log(f"Error fetching quotes for {token} ({exchange}): {e}")
     return None
 
+def resolve_dynamic_expiry(expiry_str):
+    """
+    Resolves dynamic expiry aliases (CURRENT_WEEK, NEXT_WEEK, etc.)
+    or expired dates to the active valid expiry date (>= today).
+    """
+    global cached_nifty_options
+    if not cached_nifty_options:
+        return expiry_str
+    
+    today_ist = get_now_ist().date()
+    expiry_set = set(x.get('pExpiryDate') for x in cached_nifty_options if x.get('pExpiryDate'))
+    active_expiries = []
+    for exp in expiry_set:
+        try:
+            exp_date = datetime.strptime(exp, "%d%b%Y").date()
+            if exp_date >= today_ist:
+                active_expiries.append((exp_date, exp))
+        except Exception:
+            continue
+
+    if not active_expiries:
+        return expiry_str
+
+    active_expiries.sort(key=lambda x: x[0])
+    
+    # Handle aliases
+    exp_upper = str(expiry_str).upper().strip()
+    if exp_upper in ["CURRENT_WEEK", "CURRENT WEEK", "THIS_WEEK", "THIS WEEK"]:
+        return active_expiries[0][1]
+    elif exp_upper in ["NEXT_WEEK", "NEXT WEEK"]:
+        return active_expiries[1][1] if len(active_expiries) > 1 else active_expiries[0][1]
+    elif exp_upper in ["MONTH_END", "MONTH END", "MONTHLY"]:
+        # Find the last Thursday of the current active month
+        first_exp_month = active_expiries[0][0].month
+        same_month = [x for x in active_expiries if x[0].month == first_exp_month]
+        return same_month[-1][1] if same_month else active_expiries[0][1]
+
+    # If the user saved a specific date, check if it's still valid (>= today).
+    # If it is in the past, roll it forward to current week!
+    try:
+        configured_date = datetime.strptime(expiry_str, "%d%b%Y").date()
+        if configured_date < today_ist:
+            add_app_log(f"Configured expiry {expiry_str} has passed. Auto-rolling to active current expiry {active_expiries[0][1]}.")
+            return active_expiries[0][1]
+    except Exception:
+        pass
+
+    return expiry_str
+
 def find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type):
     """
     Finds the contract whose market premium is closest to target_prem.
@@ -476,12 +525,20 @@ def run_strategy_scheduler():
             now_dt = get_now_ist()
             now_str = now_dt.strftime("%H:%M")
             now_secs = now_dt.strftime("%H:%M:%S")
+            now_time = now_dt.time()
+            today_date_str = now_dt.strftime("%Y-%m-%d")
+
+            # Standard NSE market window: 09:15 to 15:30 IST
+            market_open_time = datetime.strptime("09:15", "%H:%M").time()
+            market_close_time = datetime.strptime("15:30", "%H:%M").time()
+            is_market_hours = (market_open_time <= now_time <= market_close_time)
             
             with schedules_lock:
                 for strat in strategies_cache:
                     strat_id = strat["id"]
                     status = strat.get("status")
                     entry_time_str = strat.get("entry_time", "")
+                    exit_time_str = strat.get("exit_time", "")
 
                     if not entry_time_str:
                         continue
@@ -493,15 +550,38 @@ def run_strategy_scheduler():
                     except Exception:
                         secs_until_entry = 9999
 
-                    # 1. Warmup Trigger at T - 20s (when 0 < secs_until_entry <= 20)
-                    if status == "Deployed" and 0 < secs_until_entry <= 20:
+                    # 1. Warmup Trigger at T - 20s (only during valid market session before entry)
+                    if status == "Deployed" and 0 < secs_until_entry <= 20 and is_market_hours:
                         if strat_id not in warmup_stages:
                             warmup_strategy(strat)
 
-                    # 2. Trigger Entry at entry_time (when secs_until_entry <= 0 or now_str >= entry_time_str)
-                    if (status in ["Deployed", "Warming Up"]) and (secs_until_entry <= 0 or now_str >= entry_time_str) and strat_id not in active_deployments:
-                        trigger_strategy_entry(strat)
-                        
+                    # 2. Trigger Entry at entry_time:
+                    # STRICT GUARD:
+                    # - Must be Deployed or Warming Up
+                    # - Must be within market hours (09:15 - 15:30)
+                    # - Must NOT be past exit_time
+                    # - secs_until_entry must be between -30s and 0s (exact execution window, never firing hours later!)
+                    # - Must not have already executed today
+                    if status in ["Deployed", "Warming Up"] and strat_id not in active_deployments:
+                        if is_market_hours:
+                            is_past_exit = False
+                            if exit_time_str:
+                                try:
+                                    exit_time_obj = datetime.strptime(exit_time_str, "%H:%M").time()
+                                    if now_time >= exit_time_obj:
+                                        is_past_exit = True
+                                except Exception:
+                                    pass
+
+                            last_run_date = strat.get("last_run_date", "")
+                            already_ran_today = (last_run_date == today_date_str)
+
+                            if not is_past_exit and not already_ran_today:
+                                # Trigger within 30 seconds of entry_time
+                                if -30 <= secs_until_entry <= 0:
+                                    strat["last_run_date"] = today_date_str
+                                    trigger_strategy_entry(strat)
+
                     # 3. Check Active Deployed state (SL / Target / Exit Time)
                     if strat_id in active_deployments:
                         monitor_active_deployment(strat, now_dt, now_str, now_secs)
@@ -539,7 +619,7 @@ def warmup_strategy(strat):
 
     for idx, leg in enumerate(strat.get("legs", [])):
         option_type = leg["option_type"]
-        expiry = leg["expiry"]
+        expiry = resolve_dynamic_expiry(leg.get("expiry"))
         strike_criteria = leg.get("strike_criteria", "Strike Type")
         matching_scrip = None
 
@@ -680,7 +760,7 @@ def trigger_strategy_entry(strat):
 
     for idx, leg in enumerate(strat["legs"]):
         option_type = leg["option_type"]
-        expiry = leg["expiry"]
+        expiry = resolve_dynamic_expiry(leg.get("expiry"))
         strike_criteria = leg.get("strike_criteria", "Strike Type")
         
         matching_scrip = None
@@ -1368,12 +1448,52 @@ def get_option_expiries():
             key=lambda d: datetime.strptime(d, "%d%b%Y")
         )
         
+        # Build enriched expiry options with friendly labels
+        enriched_expiries = []
+        for idx, exp in enumerate(sorted_expiries):
+            try:
+                exp_dt = datetime.strptime(exp, "%d%b%Y")
+                display_date = exp_dt.strftime("%d %b %y")
+            except Exception:
+                display_date = exp
+
+            if idx == 0:
+                label = f"Current Week ({display_date})"
+                value = "CURRENT_WEEK"
+            elif idx == 1:
+                label = f"Next Week ({display_date})"
+                value = "NEXT_WEEK"
+            else:
+                # Check if it is month end (last Thursday/expiry of its month)
+                try:
+                    exp_dt = datetime.strptime(exp, "%d%b%Y")
+                    month_exps = [e for e in sorted_expiries if datetime.strptime(e, "%d%b%Y").month == exp_dt.month]
+                    is_last_in_month = (month_exps and month_exps[-1] == exp)
+                    if is_last_in_month:
+                        label = f"Month End ({display_date})"
+                    else:
+                        label = f"Far Expiry ({display_date})"
+                except Exception:
+                    label = f"Expiry ({display_date})"
+                value = exp
+
+            enriched_expiries.append({
+                "value": value,
+                "label": label,
+                "actual_date": exp
+            })
+
         # Fetch lot size dynamically from scrip master
         lot_size = 65 # default Nifty fallback
         if len(cached_nifty_options) > 0:
             lot_size = int(cached_nifty_options[0].get("iLotSize") or 65)
             
-        return jsonify({"success": True, "expiries": sorted_expiries, "lot_size": lot_size})
+        return jsonify({
+            "success": True, 
+            "expiries": sorted_expiries, # backwards compatibility list of string dates
+            "expiry_options": enriched_expiries, # enriched objects
+            "lot_size": lot_size
+        })
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -1480,9 +1600,29 @@ def deploy_strategy(strat_id):
     if not strat:
         return jsonify({"success": False, "error": "Strategy not found"}), 404
         
+    now_dt = get_now_ist()
+    now_time = now_dt.time()
+    entry_time_str = strat.get("entry_time", "09:20")
+    exit_time_str = strat.get("exit_time", "15:15")
+    
+    try:
+        entry_time_obj = datetime.strptime(entry_time_str, "%H:%M").time()
+        exit_time_obj = datetime.strptime(exit_time_str, "%H:%M").time()
+    except Exception:
+        entry_time_obj = datetime.strptime("09:20", "%H:%M").time()
+        exit_time_obj = datetime.strptime("15:15", "%H:%M").time()
+
+    # Clear last_run_date so if deployed during today's pre-entry window, it can fire today
+    # But if deployed after exit_time, tag last_run_date to today so it waits for tomorrow morning
+    if now_time >= exit_time_obj:
+        strat["last_run_date"] = now_dt.strftime("%Y-%m-%d")
+        add_app_log(f"Strategy '{strat['name']}' deployed after exit time ({exit_time_str}). Scheduled for next session at {entry_time_str} IST.")
+    else:
+        strat.pop("last_run_date", None)
+        add_app_log(f"Strategy '{strat['name']}' deployed. Scheduled for {entry_time_str} IST today (Warmup at T-20s).")
+
     strat["status"] = "Deployed"
     save_strategies_to_disk()
-    add_app_log(f"Deployed strategy: {strat['name']}. Awaiting Entry Time: {strat['entry_time']} (Warmup at T-20s).")
     return jsonify({"success": True})
 
 @app.route("/api/stop/<strat_id>", methods=["POST"])

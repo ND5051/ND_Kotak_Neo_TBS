@@ -1015,12 +1015,15 @@
             updateDashboardLoop();
         }
 
+        let expiryObjects = [];
+
         async function loadExpiries() {
             try {
                 const res = await fetch('/api/options/expiry');
                 if (res.ok) {
                     const data = await res.json();
-                    expiryDates = data.expiries;
+                    expiryDates = data.expiries || [];
+                    expiryObjects = data.expiry_options || [];
                     lotSize = data.lot_size || 65;
                 }
             } catch (err) {
@@ -1381,10 +1384,18 @@
             card.className = 'leg-card';
             card.id = legId;
 
-            // Generate Expiry options
-            const expiryOptions = expiryDates.map(exp => 
-                `<option value="${exp}" ${prefilled && prefilled.expiry === exp ? 'selected' : ''}>${exp}</option>`
-            ).join('');
+            // Generate Expiry options with friendly labels
+            let expiryOptions = '';
+            if (expiryObjects && expiryObjects.length > 0) {
+                expiryOptions = expiryObjects.map(obj => {
+                    const isSelected = prefilled && (prefilled.expiry === obj.value || prefilled.expiry === obj.actual_date);
+                    return `<option value="${obj.value}" ${isSelected ? 'selected' : ''}>${obj.label}</option>`;
+                }).join('');
+            } else {
+                expiryOptions = expiryDates.map(exp => 
+                    `<option value="${exp}" ${prefilled && prefilled.expiry === exp ? 'selected' : ''}>${exp}</option>`
+                ).join('');
+            }
 
             // Resolve prefilled SL & Target types
             let slType = 'None';
