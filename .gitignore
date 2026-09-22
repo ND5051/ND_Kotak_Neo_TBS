@@ -82,3 +82,6 @@ kotak-neo-python/
 logs/
 *.log
 *.log.*
+
+# Local strategy state
+strategies.json
