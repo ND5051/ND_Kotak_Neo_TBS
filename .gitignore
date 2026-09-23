@@ -85,3 +85,7 @@ logs/
 
 # Local strategy state
 strategies.json
+
+# Local enhancement tracking
+future_enhancement_ideas.md
+
