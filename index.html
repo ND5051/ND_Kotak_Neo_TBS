@@ -742,6 +742,13 @@
                             </div>
                         </div>
 
+                        <div class="form-row" style="margin-top: -6px; margin-bottom: 12px; background: rgba(59, 130, 246, 0.05); padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(59, 130, 246, 0.15);">
+                            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; margin: 0; color: var(--text-main);">
+                                <input type="checkbox" id="strat_move_sl_cost" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--primary);">
+                                <span>🛡️ Move surviving leg SL to Cost + 1 Pt on SL Hit <span style="font-weight: 400; color: var(--text-muted); font-size: 0.78rem;">(De-risks opposite leg automatically if one leg hits SL)</span></span>
+                            </label>
+                        </div>
+
                         <div class="legs-header">
                             <h3 style="font-size: 0.95rem; font-weight: 700;">Strategy Legs</h3>
                             <button type="button" class="btn btn-secondary" style="width: auto; padding: 4px 10px; font-size: 0.75rem;" onclick="addLegFormRow()">+ Add Leg</button>
@@ -1259,12 +1266,15 @@
                 }).join(', ');
 
                 const mpText = `<span class="badge" style="background:#e0f2fe; color:#0369a1; border:1px solid #bae6fd; font-size:0.65rem; margin-left:4px;" title="Market Protection">MP: ${strat.market_protection_value !== undefined ? strat.market_protection_value : 2}${strat.market_protection_type === 'Points' ? ' Pts' : '%'}</span>`;
+                const slCostBadge = strat.move_sl_to_cost_on_sl_hit 
+                    ? `<span class="badge" style="background:#fef3c7; color:#b45309; border:1px solid #fde68a; font-size:0.65rem; margin-left:4px;" title="Move Surviving Leg SL to Cost + 1 Pt on SL Hit">🛡️ De-Risk SL</span>` 
+                    : '';
 
                 tbody.innerHTML += `
                     <tr>
                         <td><strong>${strat.name}</strong></td>
                         <td>${strat.entry_time} - ${strat.exit_time}</td>
-                        <td><span class="badge" style="background:#f1f5f9; border: 1px solid var(--border-color);">${strat.trade_type}</span>${mpText}</td>
+                        <td><span class="badge" style="background:#f1f5f9; border: 1px solid var(--border-color);">${strat.trade_type}</span>${mpText}${slCostBadge}</td>
                         <td>${strat.product_type}</td>
                         <td style="font-size:0.75rem; color:var(--text-muted); max-width: 300px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${legsText}</td>
                         <td><span class="badge ${badgeClass}">${strat.status}</span></td>
@@ -1348,6 +1358,7 @@
             document.getElementById('strategy-creation-form').reset();
             document.getElementById('strat_mp_val').value = '2';
             document.getElementById('strat_mp_type').value = 'Percentage';
+            document.getElementById('strat_move_sl_cost').checked = false;
             document.getElementById('legs-container').innerHTML = '';
             legCounter = 0;
             
@@ -1685,6 +1696,7 @@
                 trade_type: document.getElementById('strat_type').value,
                 market_protection_value: parseFloat(document.getElementById('strat_mp_val').value) || 2.0,
                 market_protection_type: document.getElementById('strat_mp_type').value || 'Percentage',
+                move_sl_to_cost_on_sl_hit: document.getElementById('strat_move_sl_cost').checked,
                 legs: legs
             };
 
@@ -1725,6 +1737,7 @@
             document.getElementById('strat_type').value = strat.trade_type;
             document.getElementById('strat_mp_val').value = strat.market_protection_value !== undefined ? strat.market_protection_value : 2.0;
             document.getElementById('strat_mp_type').value = strat.market_protection_type || 'Percentage';
+            document.getElementById('strat_move_sl_cost').checked = Boolean(strat.move_sl_to_cost_on_sl_hit);
 
             const container = document.getElementById('legs-container');
             container.innerHTML = '';

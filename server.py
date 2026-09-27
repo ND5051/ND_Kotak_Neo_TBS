@@ -1115,6 +1115,57 @@ def cancel_pending_order(mode, order_id, reason):
             ord_item["time"] = now_ts
             add_app_log(f"Order {order_id} marked as Cancelled ({reason}) at {now_ts}.")
 
+def modify_pending_sl_order(mode, leg, new_sl_price, reason="SL Hit on Opposite Leg"):
+    """
+    Modifies an open/pending Stop Loss order to a new price level (e.g. Cost or Cost + 1 pt).
+    Works for both Real orders (via client.modify_order) and Paper simulated orders.
+    """
+    global orders_log
+    sl_order_id = leg.get("sl_order_id")
+    if not sl_order_id:
+        add_app_log(f"Cannot modify SL for {leg['symbol']}: No SL order ID associated.")
+        return False
+
+    old_sl_price = leg.get("sl_price", 0.0)
+    leg["sl_price"] = new_sl_price
+    # Also adjust configured stop_loss points relative to entry_price so the monitoring loop aligns
+    entry_price = leg.get("entry_price", new_sl_price)
+    if leg.get("position") == "Buy":
+        leg["stop_loss"] = round(entry_price - new_sl_price, 2)
+    else:
+        leg["stop_loss"] = round(new_sl_price - entry_price, 2)
+    leg["stop_loss_type"] = "Points"
+
+    now_ts = get_now_ist().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_new_sl = f"{new_sl_price:.2f}"
+
+    if mode == "Real" and not str(sl_order_id).startswith("SIM_") and not str(sl_order_id).startswith("SL_"):
+        try:
+            mod_res = client_instance.modify_order(
+                order_id=str(sl_order_id),
+                price=formatted_new_sl,
+                trigger_price=formatted_new_sl,
+                order_type="SL",
+                quantity=str(leg.get("qty", 0)),
+                validity="DAY"
+            )
+            add_app_log(f"Real SL Order {sl_order_id} modified to ₹{formatted_new_sl} (Broker Response: {mod_res})")
+        except Exception as e:
+            add_app_log(f"Error modifying Real SL Order {sl_order_id}: {e}")
+            return False
+    else:
+        add_app_log(f"Paper SL Order {sl_order_id} adjusted from ₹{old_sl_price:.2f} to ₹{formatted_new_sl} ({reason}).")
+
+    # Update order in orders_log
+    for ord_item in orders_log:
+        if ord_item.get("order_id") == sl_order_id and "Pending" in ord_item.get("status", ""):
+            ord_item["price"] = new_sl_price
+            ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Pending (Modified SL: ₹{formatted_new_sl})"
+            ord_item["time"] = now_ts
+            break
+
+    return True
+
 def monitor_active_deployment(strat, now_dt, now_str, now_secs):
     global active_deployments, ltp_cache, positions, orders_log
     strat_id = strat["id"]
@@ -1324,6 +1375,32 @@ def square_off_leg(strat, leg, exit_price, reason):
     for pos in positions:
         if pos["strategy_id"] == strat["id"] and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
             pos["qty"] = 0
+
+    # Enhancement #4: Move Opposite Leg SL to Cost / +1 Point Profit on SL Hit
+    if reason == "SL Hit" and strat.get("move_sl_to_cost_on_sl_hit", False):
+        strat_id = strat.get("id")
+        deploy = active_deployments.get(strat_id)
+        if deploy:
+            surviving_legs = [l for l in deploy.get("legs", []) if l.get("status") == "Active" and l.get("leg_idx") != leg.get("leg_idx")]
+            for surv_leg in surviving_legs:
+                ent_p = surv_leg.get("entry_price", 0.0)
+                pos_side = surv_leg.get("position", "Sell")
+                # For Sell position, +1 pt profit means buying back 1 pt lower (entry_price - 1.0)
+                # For Buy position, +1 pt profit means selling 1 pt higher (entry_price + 1.0)
+                if pos_side == "Sell":
+                    new_sl = round(ent_p - 1.0, 2)
+                else:
+                    new_sl = round(ent_p + 1.0, 2)
+
+                # Round to NSE tick size of 0.05
+                new_sl = round(round(new_sl / 0.05) * 0.05, 2)
+                if new_sl <= 0.05:
+                    new_sl = 0.05
+
+                old_sl = surv_leg.get("sl_price", 0.0)
+                add_app_log(f"🛡️ SL Hit on leg {leg['symbol']}. Moving surviving leg {surv_leg['symbol']} SL to Cost + 1 Pt Profit: ₹{new_sl:.2f} (was ₹{old_sl:.2f}).")
+                modify_pending_sl_order(mode, surv_leg, new_sl, reason="Opposite Leg SL Hit - Moved to Cost + 1 Pt")
+
 
 
 # Start strategy scheduler
@@ -1550,6 +1627,7 @@ def add_strategy():
                 "trade_type": data.get("trade_type", "Paper"),
                 "market_protection_value": float(data.get("market_protection_value", 2.0)),
                 "market_protection_type": data.get("market_protection_type", "Percentage"),
+                "move_sl_to_cost_on_sl_hit": bool(data.get("move_sl_to_cost_on_sl_hit", False)),
                 "legs": data["legs"]
             })
             add_app_log(f"Updated strategy: {data['name']}")
@@ -1570,6 +1648,7 @@ def add_strategy():
             "trade_type": data.get("trade_type", "Paper"),
             "market_protection_value": float(data.get("market_protection_value", 2.0)),
             "market_protection_type": data.get("market_protection_type", "Percentage"),
+            "move_sl_to_cost_on_sl_hit": bool(data.get("move_sl_to_cost_on_sl_hit", False)),
             "status": "Inactive",
             "legs": data["legs"]
         }
