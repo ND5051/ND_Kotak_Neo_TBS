@@ -628,6 +628,10 @@
                             <span style="color: var(--text-muted);">UCC</span>
                             <span id="ucc-val">-</span>
                         </div>
+                        <div style="display: flex; justify-content: space-between; padding-bottom: 4px;">
+                            <span style="color: var(--text-muted);">Today's Session</span>
+                            <span id="session-time-val" style="color: var(--text-muted); font-size: 0.8rem;">Not Logged In Today</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -644,6 +648,18 @@
 
             <div id="strategy-workspace" class="workspace-content" style="display: none;">
                 
+                <!-- Session Expired / Outdated Alert Banner -->
+                <div id="session-warning-banner" style="display: none; background: #fff1f2; border: 1px solid #fecdd3; border-left: 4px solid var(--error); border-radius: 8px; padding: 12px 18px; margin-bottom: 20px; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <span style="font-size: 1.5rem;">⚠️</span>
+                        <div>
+                            <strong style="color: #9f1239; font-size: 0.95rem;">Kotak Neo Session Expired / Not Authenticated For Today</strong>
+                            <div style="color: #881337; font-size: 0.8rem; margin-top: 2px;" id="session-warning-msg">You must perform a fresh login every morning. Real strategy orders will fail until you re-authenticate.</div>
+                        </div>
+                    </div>
+                    <button class="btn btn-danger" style="width: auto; padding: 6px 16px; font-size: 0.8rem; white-space: nowrap;" onclick="switchPane('login-pane')">🔑 Login Now</button>
+                </div>
+
                 <!-- Saved Strategies Panel (Now Top & Symmetrical) -->
                 <div class="panel">
                     <div class="panel-header">
@@ -935,6 +951,10 @@
         }
         fetchConfig();
 
+        // Start background polling loop immediately to reflect live server/session status
+        dashboardInterval = setInterval(updateDashboardLoop, 2000);
+        updateDashboardLoop();
+
         // Login Handler
         const credentialsForm = document.getElementById('credentials-form');
         credentialsForm.addEventListener('submit', async (e) => {
@@ -1049,6 +1069,63 @@
                 document.getElementById('nifty-val').textContent = data.spot_rates.nifty ? data.spot_rates.nifty.toFixed(2) : '--';
                 document.getElementById('banknifty-val').textContent = data.spot_rates.banknifty ? data.spot_rates.banknifty.toFixed(2) : '--';
                 document.getElementById('sensex-val').textContent = data.spot_rates.sensex ? data.spot_rates.sensex.toFixed(2) : '--';
+
+                // Session Health Check & UI Safeguard
+                const sess = data.session || {};
+                const bridgeVal = document.getElementById('bridge-status-val');
+                const sessTimeVal = document.getElementById('session-time-val');
+                const sessBanner = document.getElementById('session-warning-banner');
+                const sessMsg = document.getElementById('session-warning-msg');
+                const clientNameVal = document.getElementById('client-name-val');
+                const uccVal = document.getElementById('ucc-val');
+
+                if (sess.client_name) clientNameVal.textContent = sess.client_name;
+                if (sess.ucc) uccVal.textContent = sess.ucc;
+
+                if (sess.is_authenticated && sess.is_valid_today) {
+                    // Session is fully active for today
+                    if (bridgeVal) {
+                        bridgeVal.textContent = 'CONNECTED (Active)';
+                        bridgeVal.style.color = 'var(--primary)';
+                    }
+                    if (sessTimeVal) {
+                        sessTimeVal.innerHTML = `<span style="color: var(--primary); font-weight: 600;">Active Today (${sess.login_time || 'OK'})</span>`;
+                    }
+                    if (sessBanner) sessBanner.style.display = 'none';
+                    isConnected = true;
+                } else if (sess.is_authenticated && !sess.is_valid_today) {
+                    // Session was from a previous day (expired overnight)
+                    if (bridgeVal) {
+                        bridgeVal.textContent = 'EXPIRED (Previous Session)';
+                        bridgeVal.style.color = '#d97706';
+                    }
+                    if (sessTimeVal) {
+                        sessTimeVal.innerHTML = `<span style="color: #d97706; font-weight: 600;">Logged in on ${sess.login_date} (Expired Overnight)</span>`;
+                    }
+                    if (sessBanner) {
+                        sessBanner.style.display = 'flex';
+                        if (sessMsg) {
+                            sessMsg.textContent = `Your session token from ${sess.login_date} has expired. Please go to Login tab and click "Establish Connection" before deploying strategies.`;
+                        }
+                    }
+                    isConnected = false;
+                } else {
+                    // Not connected / token revoked
+                    if (bridgeVal) {
+                        bridgeVal.textContent = 'DISCONNECTED';
+                        bridgeVal.style.color = 'var(--error)';
+                    }
+                    if (sessTimeVal) {
+                        sessTimeVal.innerHTML = `<span style="color: var(--error);">Not Logged In</span>`;
+                    }
+                    if (sessBanner) {
+                        sessBanner.style.display = 'flex';
+                        if (sessMsg) {
+                            sessMsg.textContent = "Kotak Neo session is not authenticated. Please log in before deploying strategies.";
+                        }
+                    }
+                    isConnected = false;
+                }
 
                 // 2. Render logs
                 const logsBody = document.getElementById('logs-container-body');
@@ -1304,6 +1381,13 @@
         }
 
         async function deployStrategy(id) {
+            const strat = localStrats.find(s => s.id === id);
+            if (strat && strat.trade_type === 'Real' && !isConnected) {
+                showBanner("Cannot deploy Real strategy: Kotak Neo session is not authenticated for today. Please log in first.", true);
+                switchPane('login-pane');
+                return;
+            }
+
             try {
                 const res = await fetch(`/api/deploy/${id}`, { method: 'POST' });
                 if (res.ok) {

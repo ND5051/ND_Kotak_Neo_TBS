@@ -57,6 +57,13 @@ spot_rates = {"nifty": 0.0, "banknifty": 0.0, "sensex": 0.0}
 ltp_cache = {}  # token -> price
 app_logs = []
 app_logs_lock = threading.Lock()
+session_info = {
+    "is_authenticated": False,
+    "login_date": "",
+    "login_time": "",
+    "client_name": "",
+    "ucc": ""
+}
 
 strategies_file = os.path.join(current_dir, "strategies.json")
 strategies_cache = []
@@ -884,11 +891,17 @@ def trigger_strategy_entry(strat):
                         add_app_log(f"Warning: Could not confirm execution for entry order {entry_order_id}. Halting secondary orders.")
                 else:
                     err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
+                    if "Invalid session" in str(err_text) or response.get("stCode") == 100022:
+                        session_info["is_authenticated"] = False
+                        add_app_log("⚠️ Kotak Neo session token has EXPIRED. Please log in again from the Login tab.")
                     entry_order_id = f"ERR_{int(time.time()*1000)}"
                     order_status = f"Failed (Broker: {err_text})"
                     entry_success = False
                     add_app_log(f"Real Entry Order Rejected on placement: {response}")
             except Exception as e:
+                if "Invalid session" in str(e) or "100022" in str(e):
+                    session_info["is_authenticated"] = False
+                    add_app_log("⚠️ Kotak Neo session token has EXPIRED. Please log in again from the Login tab.")
                 add_app_log(f"Real Entry Order Placement Exception: {e}")
                 entry_order_id = f"ERR_{int(time.time()*1000)}"
                 order_status = f"Failed ({str(e)})"
@@ -1457,6 +1470,15 @@ def login():
             validate_response = client.totp_validate(mpin=mpin)
             if validate_response.get("data") and "token" in validate_response["data"]:
                 client_instance = client
+                today_ist_str = get_now_ist().strftime("%Y-%m-%d")
+                now_time_str = get_now_ist().strftime("%H:%M:%S")
+                client_name_val = validate_response.get("data", {}).get("clientName", "User")
+                
+                session_info["is_authenticated"] = True
+                session_info["login_date"] = today_ist_str
+                session_info["login_time"] = now_time_str
+                session_info["client_name"] = client_name_val
+                session_info["ucc"] = ucc
                 
                 # Start preloading master scrips in background
                 t = threading.Thread(target=preload_scrip_masters, args=(client,), daemon=True)
@@ -1468,8 +1490,8 @@ def login():
                 return jsonify({
                     "success": True,
                     "message": "Login and session validation successful!",
-                    "client_name": validate_response.get("data", {}).get("clientName", "User"),
-                    "login_time": validate_response.get("data", {}).get("loginTime", "")
+                    "client_name": client_name_val,
+                    "login_time": now_time_str
                 })
             else:
                 add_app_log(f"MPIN validation failed: {validate_response}")
@@ -1678,6 +1700,20 @@ def deploy_strategy(strat_id):
     strat = next((x for x in strategies_cache if x["id"] == strat_id), None)
     if not strat:
         return jsonify({"success": False, "error": "Strategy not found"}), 404
+
+    # UI Safeguard: Verify active broker session for today before allowing Real deployment
+    today_str = get_now_ist().strftime("%Y-%m-%d")
+    is_session_today = (
+        client_instance is not None
+        and session_info.get("is_authenticated")
+        and session_info.get("login_date") == today_str
+    )
+    if strat.get("trade_type") == "Real" and not is_session_today:
+        return jsonify({
+            "success": False, 
+            "error": "Cannot deploy Real strategy: Kotak Neo session is not authenticated for today. Please log in first."
+        }), 401
+
         
     now_dt = get_now_ist()
     now_time = now_dt.time()
@@ -1776,15 +1812,28 @@ def get_dashboard_updates():
     with app_logs_lock:
         logs_slice = list(app_logs)
 
+    # Check if session was authenticated today
+    today_str = get_now_ist().strftime("%Y-%m-%d")
+    is_session_today = (
+        client_instance is not None 
+        and session_info.get("is_authenticated", False) 
+        and session_info.get("login_date") == today_str
+    )
+    
     # Fetch active client name & ucc
-    client_name = "-"
-    ucc = "-"
-    if client_instance is not None:
-        client_name = "Neo Client"
-        ucc = os.environ.get("NEO_UCC", "-")
+    client_name = session_info.get("client_name") or ("Neo Client" if client_instance is not None else "-")
+    ucc = session_info.get("ucc") or os.environ.get("NEO_UCC", "-")
 
     return jsonify({
         "success": True,
+        "session": {
+            "is_authenticated": bool(client_instance is not None and session_info.get("is_authenticated", False)),
+            "is_valid_today": is_session_today,
+            "login_date": session_info.get("login_date", ""),
+            "login_time": session_info.get("login_time", ""),
+            "client_name": client_name,
+            "ucc": ucc
+        },
         "client_name": client_name,
         "ucc": ucc,
         "spot_rates": spot_rates,
