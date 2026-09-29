@@ -367,6 +367,56 @@ def get_order_execution_details(order_id, max_retries=10, delay_sec=1.0):
 
     return None
 
+# Fetch net open quantity for a symbol directly from broker
+def get_broker_net_position(trading_symbol):
+    """
+    Queries client_instance.positions() to determine the actual net quantity open at the broker.
+    Returns:
+        int: Net open quantity (positive for Long, negative for Short, 0 if flat/none found),
+        or None if broker query failed or was unavailable.
+    """
+    global client_instance
+    if client_instance is None or not trading_symbol:
+        return None
+    try:
+        pos_res = client_instance.positions()
+        items = []
+        if isinstance(pos_res, list):
+            items = pos_res
+        elif isinstance(pos_res, dict):
+            data_field = pos_res.get("data")
+            if isinstance(data_field, list):
+                items = data_field
+            elif isinstance(data_field, dict):
+                inner_data = data_field.get("data")
+                items = inner_data if isinstance(inner_data, list) else [data_field]
+            else:
+                items = pos_res.get("result") or []
+        
+        target_sym = trading_symbol.strip().upper()
+        for p in items:
+            if not isinstance(p, dict):
+                continue
+            sym = str(p.get("trdSym") or p.get("tradingSymbol") or p.get("symbol") or "").strip().upper()
+            if sym == target_sym:
+                # Kotak Neo positions response has netQty / flBuyQty / flSellQty
+                raw_net = p.get("netQty") or p.get("netQuantity") or p.get("flNetQty")
+                if raw_net is not None:
+                    try:
+                        return int(float(raw_net))
+                    except (ValueError, TypeError):
+                        pass
+                # Fallback calculation if buy and sell quantities exist
+                buy_qty = float(p.get("flBuyQty") or p.get("buyQty") or 0)
+                sell_qty = float(p.get("flSellQty") or p.get("sellQty") or 0)
+                return int(buy_qty - sell_qty)
+        # If symbol was not in positions list at all, net quantity is 0
+        return 0
+    except Exception as e:
+        add_app_log(f"Notice: Failed to fetch broker positions for {trading_symbol}: {e}")
+        return None
+
+
 # Calculate Limit price with Market Protection buffer
 def apply_market_protection(ref_price, transaction_type, mp_val=2.0, mp_type="Percentage"):
     try:
@@ -1226,6 +1276,34 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
         # Check Stop Loss & Target criteria
         sl_hit = False
         target_hit = False
+        sl_fill_price = None
+
+        # Broker Reconciliation Check (Real Mode):
+        # 1. Check if broker-side SL order has already filled on the exchange
+        if mode == "Real" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+            sl_det = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
+            if sl_det and sl_det.get("status") == "complete":
+                sl_hit = True
+                sl_fill_price = sl_det.get("avg_price") or current_price
+                add_app_log(f"🔔 Exchange Fill Detected: Broker SL order {leg['sl_order_id']} for {leg['symbol']} was FILLED at ₹{sl_fill_price:.2f}.")
+
+        # 2. Check if position was closed externally (User manual square-off on phone/web or RMS)
+        if mode == "Real" and not sl_hit:
+            broker_net = get_broker_net_position(leg["symbol"])
+            if broker_net is not None and broker_net == 0:
+                add_app_log(f"⚠️ External Square-off Detected: Broker net open position for {leg['symbol']} is 0! Reconciling TBS state.")
+                # Auto-cancel any remaining pending orders for this leg so they don't fire later
+                if leg.get("sl_order_id"):
+                    cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                if leg.get("tgt_order_id"):
+                    cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                leg["status"] = "Completed (External Exit)"
+                leg["exit_price"] = current_price
+                for pos in positions:
+                    if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
+                        pos["qty"] = 0
+                continue
+
         
         # Points / Percent Check
         sl_val = float(leg.get("stop_loss", 0))
@@ -1253,14 +1331,18 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
         # Trigger Square-off / OCO if exit condition met
         if time_exit or sl_hit or target_hit:
             status_text = "Time Exit"
+            exit_p = current_price
             if sl_hit:
                 status_text = "SL Hit"
+                if sl_fill_price is not None:
+                    exit_p = sl_fill_price
             elif target_hit:
                 status_text = "Target Hit"
                 
-            square_off_leg(strat, leg, current_price, status_text)
+            square_off_leg(strat, leg, exit_p, status_text)
         else:
             active_legs_count += 1
+
             
     # If all legs are completed, clean up active deployment
     if active_legs_count == 0 or time_exit:
@@ -1310,16 +1392,42 @@ def square_off_leg(strat, leg, exit_price, reason):
     )
 
     if not has_active_pos:
-        add_app_log(f"Skipping square-off order for leg {leg['symbol']}: No active position found.")
+        add_app_log(f"Skipping square-off order for leg {leg['symbol']}: No active position found in TBS tracker.")
         return
 
-    # If broker SL order was already submitted and reason is SL Hit, broker SL order itself closes position
-    # Otherwise, submit a Limit/Market Protection square-off order
+    # Real-mode Pre-Flight Safety Checks with Broker
     need_broker_exit = True
-    if reason == "SL Hit" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
-        # Broker-side SL was already active at exchange
-        need_broker_exit = False
-        add_app_log(f"Broker-side SL order {leg['sl_order_id']} handled square-off for {leg['symbol']}.")
+    if mode == "Real":
+        # Check A: If reason is SL Hit and we placed a broker-side SL order, that order closed the position
+        if reason == "SL Hit" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+            need_broker_exit = False
+            add_app_log(f"Broker-side SL order {leg['sl_order_id']} handled square-off for {leg['symbol']}.")
+
+        # Check B: For Time Exit / Manual Stop / Target Hit, check if the SL order was already executed at broker
+        if need_broker_exit and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+            sl_det = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
+            if sl_det and sl_det.get("status") == "complete":
+                need_broker_exit = False
+                actual_sl_px = sl_det.get("avg_price") or exit_price
+                exit_price = actual_sl_px
+                leg["status"] = "SL Hit"
+                leg["exit_price"] = actual_sl_px
+                reason = "SL Hit"
+                # Update SL order in orders log to complete
+                for ord_item in orders_log:
+                    if ord_item.get("order_id") == leg["sl_order_id"]:
+                        ord_item["status"] = "Executed (SL Hit)"
+                        ord_item["price"] = actual_sl_px
+                        ord_item["time"] = exit_ts
+                add_app_log(f"🛡️ Safety Check: Discovered broker SL order {leg['sl_order_id']} for {leg['symbol']} was ALREADY filled at ₹{actual_sl_px:.2f}! Aborting duplicate exit order.")
+
+        # Check C: Net broker position reconciliation check before placing ANY market/limit exit order
+        if need_broker_exit:
+            broker_net_qty = get_broker_net_position(leg["symbol"])
+            if broker_net_qty is not None and broker_net_qty == 0:
+                need_broker_exit = False
+                add_app_log(f"🛡️ Safety Guard: Broker net open quantity for {leg['symbol']} is 0 (already closed externally or via SL). Skipped placing redundant exit order.")
+
 
     # Place Limit exit order with market protection
     order_status = "Simulated Executed"
