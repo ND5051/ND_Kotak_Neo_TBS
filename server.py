@@ -372,46 +372,98 @@ def get_broker_net_position(trading_symbol):
     """
     Queries client_instance.positions() to determine the actual net quantity open at the broker.
     Returns:
-        int: Net open quantity (positive for Long, negative for Short, 0 if flat/none found),
-        or None if broker query failed or was unavailable.
+        int: Net open quantity (positive for Long, negative for Short, 0 if flat/confirmed closed),
+        or None if broker query failed or returned an unconfirmed/empty response.
     """
     global client_instance
     if client_instance is None or not trading_symbol:
         return None
     try:
         pos_res = client_instance.positions()
+        if not pos_res or isinstance(pos_res, dict) and ("Error" in pos_res or "error" in pos_res or "Error Message" in pos_res):
+            add_app_log(f"Notice: Broker positions API returned error response: {pos_res}")
+            return None
+
         items = []
         if isinstance(pos_res, list):
             items = pos_res
         elif isinstance(pos_res, dict):
-            data_field = pos_res.get("data")
-            if isinstance(data_field, list):
-                items = data_field
-            elif isinstance(data_field, dict):
-                inner_data = data_field.get("data")
-                items = inner_data if isinstance(inner_data, list) else [data_field]
-            else:
-                items = pos_res.get("result") or []
-        
+            # Check various response structures in Neo API
+            for key in ["data", "result", "dataList", "positions"]:
+                val = pos_res.get(key)
+                if isinstance(val, list):
+                    items = val
+                    break
+                elif isinstance(val, dict):
+                    inner = val.get("data") or val.get("result") or val.get("positions")
+                    if isinstance(inner, list):
+                        items = inner
+                        break
+            
+            # If still empty but dict has stat/status == "Ok" or "success", or no items found
+            if not items and isinstance(pos_res.get("data"), list):
+                items = pos_res["data"]
+
         target_sym = trading_symbol.strip().upper()
+        # Clean stripped target symbol (e.g. without spaces)
+        clean_target = "".join(target_sym.split())
+
+        found_symbol = False
         for p in items:
             if not isinstance(p, dict):
                 continue
-            sym = str(p.get("trdSym") or p.get("tradingSymbol") or p.get("symbol") or "").strip().upper()
-            if sym == target_sym:
-                # Kotak Neo positions response has netQty / flBuyQty / flSellQty
-                raw_net = p.get("netQty") or p.get("netQuantity") or p.get("flNetQty")
-                if raw_net is not None:
-                    try:
-                        return int(float(raw_net))
-                    except (ValueError, TypeError):
-                        pass
+            
+            # Check all possible symbol keys in Kotak Neo positions
+            sym_raw = (
+                p.get("trdSym") 
+                or p.get("tradingSymbol") 
+                or p.get("symbol") 
+                or p.get("sym") 
+                or p.get("dispSym") 
+                or p.get("secDesc") 
+                or ""
+            )
+            sym = "".join(str(sym_raw).strip().upper().split())
+            
+            # Also check if token matches
+            tok = str(p.get("tok") or p.get("token") or p.get("instrumentToken") or "")
+            
+            if sym == clean_target or clean_target in sym or sym in clean_target:
+                found_symbol = True
+                # Kotak Neo positions response keys for net qty
+                for q_key in ["netQty", "netQuantity", "flNetQty", "net_qty", "qty"]:
+                    raw_val = p.get(q_key)
+                    if raw_val is not None:
+                        try:
+                            return int(float(raw_val))
+                        except (ValueError, TypeError):
+                            pass
+                
                 # Fallback calculation if buy and sell quantities exist
-                buy_qty = float(p.get("flBuyQty") or p.get("buyQty") or 0)
-                sell_qty = float(p.get("flSellQty") or p.get("sellQty") or 0)
+                buy_qty = 0.0
+                sell_qty = 0.0
+                for b_key in ["flBuyQty", "buyQty", "bQty", "totalBuyQty"]:
+                    if p.get(b_key) is not None:
+                        try:
+                            buy_qty = float(p.get(b_key))
+                            break
+                        except (ValueError, TypeError):
+                            pass
+                for s_key in ["flSellQty", "sellQty", "sQty", "totalSellQty"]:
+                    if p.get(s_key) is not None:
+                        try:
+                            sell_qty = float(p.get(s_key))
+                            break
+                        except (ValueError, TypeError):
+                            pass
+                            
                 return int(buy_qty - sell_qty)
-        # If symbol was not in positions list at all, net quantity is 0
-        return 0
+
+        # CRITICAL SAFETY: If items list was empty or symbol was not found in items,
+        # we CANNOT safely assume the position is closed! Only confirm 0 if the symbol
+        # was explicitly found in broker positions with netQty == 0.
+        # Returning None prevents accidental premature external square-off.
+        return None
     except Exception as e:
         add_app_log(f"Notice: Failed to fetch broker positions for {trading_symbol}: {e}")
         return None
@@ -1291,18 +1343,24 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
         if mode == "Real" and not sl_hit:
             broker_net = get_broker_net_position(leg["symbol"])
             if broker_net is not None and broker_net == 0:
-                add_app_log(f"⚠️ External Square-off Detected: Broker net open position for {leg['symbol']} is 0! Reconciling TBS state.")
-                # Auto-cancel any remaining pending orders for this leg so they don't fire later
-                if leg.get("sl_order_id"):
-                    cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
-                if leg.get("tgt_order_id"):
-                    cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
-                leg["status"] = "Completed (External Exit)"
-                leg["exit_price"] = current_price
-                for pos in positions:
-                    if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
-                        pos["qty"] = 0
-                continue
+                # Require 3 consecutive confirmations across monitoring cycles before auto-exiting
+                zero_count = leg.get("_zero_pos_count", 0) + 1
+                leg["_zero_pos_count"] = zero_count
+                if zero_count >= 3:
+                    add_app_log(f"⚠️ External Square-off Confirmed: Broker net open position for {leg['symbol']} confirmed 0 across 3 checks. Reconciling TBS state.")
+                    # Auto-cancel any remaining pending orders for this leg so they don't fire later
+                    if leg.get("sl_order_id"):
+                        cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                    if leg.get("tgt_order_id"):
+                        cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                    leg["status"] = "Completed (External Exit)"
+                    leg["exit_price"] = current_price
+                    for pos in positions:
+                        if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
+                            pos["qty"] = 0
+                    continue
+            else:
+                leg["_zero_pos_count"] = 0
 
         
         # Points / Percent Check
