@@ -982,8 +982,6 @@ def trigger_strategy_entry(strat):
                 # Apply market protection to limit price
                 entry_limit_price = apply_market_protection(entry_price, leg["position"], mp_val, mp_type)
                 formatted_entry_limit = f"{entry_limit_price:.2f}"
-                order_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_E{idx+1}"
-                
                 response = client_instance.place_order(
                     exchange_segment="nse_fo",
                     product=strat["product_type"],
@@ -992,8 +990,7 @@ def trigger_strategy_entry(strat):
                     quantity=str(qty),
                     validity="DAY",
                     trading_symbol=symbol,
-                    transaction_type="B" if leg["position"] == "Buy" else "S",
-                    tag=order_tag
+                    transaction_type="B" if leg["position"] == "Buy" else "S"
                 )
                 
                 # Check for broker acceptance
@@ -1095,8 +1092,6 @@ def trigger_strategy_entry(strat):
                     sl_txn_type = "S" if leg["position"] == "Buy" else "B"
                     formatted_sl_trigger = f"{sl_price:.2f}"
                     formatted_sl_limit = f"{sl_price:.2f}"
-                    sl_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_SL{idx+1}"
-
                     sl_res = client_instance.place_order(
                         exchange_segment="nse_fo",
                         product=strat["product_type"],
@@ -1106,8 +1101,7 @@ def trigger_strategy_entry(strat):
                         quantity=str(qty),
                         validity="DAY",
                         trading_symbol=symbol,
-                        transaction_type=sl_txn_type,
-                        tag=sl_tag
+                        transaction_type=sl_txn_type
                     )
                     
                     ord_no = sl_res.get("nOrdNo") if isinstance(sl_res, dict) else None
@@ -1167,7 +1161,6 @@ def trigger_strategy_entry(strat):
             if mode == "Real":
                 try:
                     formatted_tgt_price = f"{tgt_price:.2f}"
-                    tgt_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_T{idx+1}"
                     tgt_res = client_instance.place_order(
                         exchange_segment="nse_fo",
                         product=strat["product_type"],
@@ -1176,8 +1169,7 @@ def trigger_strategy_entry(strat):
                         quantity=str(qty),
                         validity="DAY",
                         trading_symbol=symbol,
-                        transaction_type="S" if leg["position"] == "Buy" else "B",
-                        tag=tgt_tag
+                        transaction_type="S" if leg["position"] == "Buy" else "B"
                     )
                     ord_no = tgt_res.get("nOrdNo") if isinstance(tgt_res, dict) else None
                     if ord_no:
@@ -1562,7 +1554,6 @@ def square_off_leg(strat, leg, exit_price, reason):
     exit_order_id = f"SIM_EXIT_{int(time.time()*1000)}"
     if mode == "Real" and need_broker_exit:
         try:
-            sq_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_EXIT"
             response = client_instance.place_order(
                 exchange_segment="nse_fo",
                 product=strat["product_type"],
@@ -1571,8 +1562,7 @@ def square_off_leg(strat, leg, exit_price, reason):
                 quantity=str(leg["qty"]),
                 validity="DAY",
                 trading_symbol=leg["symbol"],
-                transaction_type=exit_txn_type,
-                tag=sq_tag
+                transaction_type=exit_txn_type
             )
             ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
             if ord_no:
