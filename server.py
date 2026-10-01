@@ -368,19 +368,22 @@ def get_order_execution_details(order_id, max_retries=10, delay_sec=1.0):
                         "rej_reason": "",
                         "raw": record
                     }
-                elif raw_st in ["open", "trigger_pending", "trigger pending", "pending", "validation pending"]:
-                    return {
-                        "status": "open",
-                        "raw_status": raw_st,
-                        "avg_price": avg_price,
-                        "filled_qty": filled_qty,
-                        "rej_reason": "",
-                        "raw": record
-                    }
+                else:
+                    # Order is still open, pending, or in validation - do NOT return early!
+                    # Continue polling through max_retries until it fills or reaches terminal state.
+                    pass
         except Exception as e:
             add_app_log(f"Error checking order execution details for {order_id}: {e}")
 
-    return None
+    # If all attempts exhausted and order remains open/unfilled
+    return {
+        "status": "open",
+        "raw_status": "open_timeout",
+        "avg_price": None,
+        "filled_qty": 0,
+        "rej_reason": "Order remained open without filling within timeout",
+        "raw": None
+    }
 
 # Fetch net open quantity for a symbol/token directly from broker
 def get_broker_net_position(trading_symbol, instrument_token=None):
