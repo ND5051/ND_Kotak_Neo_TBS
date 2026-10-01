@@ -1092,6 +1092,8 @@ def trigger_strategy_entry(strat):
 
             if mode == "Real":
                 try:
+                    # SEBI Pacing Guard: 1.0s gap after primary entry fill before placing SL order
+                    time.sleep(1.0)
                     sl_txn_type = "S" if leg["position"] == "Buy" else "B"
                     formatted_sl_trigger = f"{sl_price:.2f}"
                     formatted_sl_limit = f"{sl_price:.2f}"
@@ -1163,6 +1165,8 @@ def trigger_strategy_entry(strat):
 
             if mode == "Real":
                 try:
+                    # SEBI Pacing Guard: 1.0s gap between SL and Target placement
+                    time.sleep(1.0)
                     formatted_tgt_price = f"{tgt_price:.2f}"
                     tgt_res = client_instance.place_order(
                         exchange_segment="nse_fo",
@@ -1236,6 +1240,10 @@ def trigger_strategy_entry(strat):
             "entry_time_epoch": time.time(),
             "status": "Active" # Active, Target Hit, SL Hit, Squared Off
         })
+
+        # SEBI Pacing Guard: 1.0s gap before starting subsequent leg execution in multi-leg baskets
+        if mode == "Real" and idx < len(strat.get("legs", [])) - 1:
+            time.sleep(1.0)
 
     # Only activate strategy if at least one leg executed successfully
     if len(deployment["legs"]) > 0:
