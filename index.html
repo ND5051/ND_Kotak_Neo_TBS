@@ -922,6 +922,12 @@
                 document.getElementById('login-tab-btn').classList.add('active');
             } else {
                 document.getElementById('strategy-tab-btn').classList.add('active');
+                if (isConnected) {
+                    const lockWarn = document.getElementById('lock-warning');
+                    const stratWork = document.getElementById('strategy-workspace');
+                    if (lockWarn) lockWarn.style.display = 'none';
+                    if (stratWork) stratWork.style.display = 'flex';
+                }
             }
         }
 
@@ -1139,6 +1145,22 @@
                         sessTimeVal.innerHTML = `<span style="color: var(--primary); font-weight: 600;">Active Today (${sess.login_time || 'OK'})</span>`;
                     }
                     if (sessBanner) sessBanner.style.display = 'none';
+
+                    // If user refreshed the browser, auto-unlock strategies workspace
+                    const lockWarn = document.getElementById('lock-warning');
+                    const stratWork = document.getElementById('strategy-workspace');
+                    const tickers = document.getElementById('header-tickers');
+                    if (lockWarn && stratWork && !isConnected) {
+                        lockWarn.style.display = 'none';
+                        stratWork.style.display = 'flex';
+                        if (tickers) tickers.style.display = 'flex';
+                        if (expiryDates.length === 0) {
+                            loadExpiries();
+                        }
+                        if (localStrats.length === 0) {
+                            loadSavedStrategies();
+                        }
+                    }
                     isConnected = true;
                 } else if (sess.is_authenticated && !sess.is_valid_today) {
                     // Session was from a previous day (expired overnight)
