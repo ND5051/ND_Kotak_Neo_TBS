@@ -566,11 +566,17 @@
         </div>
 
         <div class="main-tabs">
-            <button id="login-tab-btn" class="tab-trigger active" onclick="switchPane('login-pane')">Login</button>
-            <button id="strategy-tab-btn" class="tab-trigger" onclick="switchPane('strategy-pane')">Strategies</button>
+            <button id="login-tab-btn" class="tab-trigger active" onclick="switchPane('login-pane')">🔑 Login</button>
+            <button id="strategy-tab-btn" class="tab-trigger" style="display: none;" onclick="switchPane('strategy-pane')">⚡ Strategies</button>
         </div>
 
-        <div class="header-meta">
+        <div class="header-meta" style="display: flex; align-items: center; gap: 15px;">
+            <!-- Active User Session Pill (Shown only when logged in) -->
+            <div id="header-user-pill" style="display: none; align-items: center; gap: 10px; background: #ecfdf5; border: 1px solid #a7f3d0; padding: 4px 12px; border-radius: 20px; font-size: 0.75rem;">
+                <span style="display: inline-block; width: 7px; height: 7px; background: #10b981; border-radius: 50%; box-shadow: 0 0 6px #10b981;"></span>
+                <span style="color: #065f46; font-weight: 600;" id="header-user-name">User (W0EZB)</span>
+                <button onclick="handleLogout()" title="Disconnect broker session" style="background: none; border: none; color: #ef4444; font-size: 0.75rem; cursor: pointer; padding: 0 0 0 6px; border-left: 1px solid #d1fae5; font-weight: 600; transition: color 0.2s;" onmouseover="this.style.color='#b91c1c'" onmouseout="this.style.color='#ef4444'">Disconnect ⏏</button>
+            </div>
             <div id="live-clock">--:--:--</div>
         </div>
     </header>
@@ -974,6 +980,24 @@
             }
         }
 
+        // Logout / Disconnect session
+        async function handleLogout() {
+            if (!confirm("Are you sure you want to disconnect the active broker session?")) {
+                return;
+            }
+            try {
+                const res = await fetch('/api/logout', { method: 'POST' });
+                if (res.ok) {
+                    showBanner("Broker session disconnected.", false);
+                    isConnected = false;
+                    switchPane('login-pane');
+                    updateDashboardLoop();
+                }
+            } catch (err) {
+                console.error("Logout failed:", err);
+            }
+        }
+
         // Show Toast Notifications
         function showBanner(text, isError = true) {
             const banner = document.getElementById('status-banner');
@@ -1135,8 +1159,36 @@
                 if (sess.client_name) clientNameVal.textContent = sess.client_name;
                 if (sess.ucc) uccVal.textContent = sess.ucc;
 
+                const loginTabBtn = document.getElementById('login-tab-btn');
+                const stratTabBtn = document.getElementById('strategy-tab-btn');
+                const userPill = document.getElementById('header-user-pill');
+                const userNameEl = document.getElementById('header-user-name');
+                const lockWarn = document.getElementById('lock-warning');
+                const stratWork = document.getElementById('strategy-workspace');
+                const tickers = document.getElementById('header-tickers');
+
                 if (sess.is_authenticated && sess.is_valid_today) {
-                    // Session is fully active for today
+                    // --- ACTIVE AUTHENTICATED STATE ---
+                    // 1. Hide Login tab button, Show Strategies tab button
+                    if (loginTabBtn) loginTabBtn.style.display = 'none';
+                    if (stratTabBtn) stratTabBtn.style.display = 'inline-block';
+                    
+                    // 2. Show user profile pill in header
+                    if (userPill) {
+                        userPill.style.display = 'flex';
+                        if (userNameEl) userNameEl.textContent = `${sess.client_name || 'Client'} (${sess.ucc || ''})`;
+                    }
+
+                    // 3. Unlock Strategies workspace & Tickers
+                    if (lockWarn) lockWarn.style.display = 'none';
+                    if (stratWork) stratWork.style.display = 'flex';
+                    if (tickers) tickers.style.display = 'flex';
+
+                    // 4. Auto-route to strategy pane if currently on login-pane or first load
+                    if (activePaneId === 'login-pane' || !isConnected) {
+                        switchPane('strategy-pane');
+                    }
+
                     if (bridgeVal) {
                         bridgeVal.textContent = 'CONNECTED (Active)';
                         bridgeVal.style.color = 'var(--primary)';
@@ -1146,51 +1198,59 @@
                     }
                     if (sessBanner) sessBanner.style.display = 'none';
 
-                    // If user refreshed the browser, auto-unlock strategies workspace
-                    const lockWarn = document.getElementById('lock-warning');
-                    const stratWork = document.getElementById('strategy-workspace');
-                    const tickers = document.getElementById('header-tickers');
-                    if (lockWarn && stratWork && !isConnected) {
-                        lockWarn.style.display = 'none';
-                        stratWork.style.display = 'flex';
-                        if (tickers) tickers.style.display = 'flex';
-                        if (expiryDates.length === 0) {
-                            loadExpiries();
-                        }
-                        if (localStrats.length === 0) {
-                            loadSavedStrategies();
-                        }
+                    if (expiryDates.length === 0) {
+                        loadExpiries();
+                    }
+                    if (localStrats.length === 0) {
+                        loadSavedStrategies();
                     }
                     isConnected = true;
-                } else if (sess.is_authenticated && !sess.is_valid_today) {
-                    // Session was from a previous day (expired overnight)
-                    if (bridgeVal) {
-                        bridgeVal.textContent = 'EXPIRED (Previous Session)';
-                        bridgeVal.style.color = '#d97706';
-                    }
-                    if (sessTimeVal) {
-                        sessTimeVal.innerHTML = `<span style="color: #d97706; font-weight: 600;">Logged in on ${sess.login_date} (Expired Overnight)</span>`;
-                    }
-                    if (sessBanner) {
-                        sessBanner.style.display = 'flex';
-                        if (sessMsg) {
-                            sessMsg.textContent = `Your session token from ${sess.login_date} has expired. Please go to Login tab and click "Establish Connection" before deploying strategies.`;
-                        }
-                    }
-                    isConnected = false;
                 } else {
-                    // Not connected / token revoked
-                    if (bridgeVal) {
-                        bridgeVal.textContent = 'DISCONNECTED';
-                        bridgeVal.style.color = 'var(--error)';
+                    // --- DISCONNECTED / EXPIRED STATE ---
+                    // 1. Show Login tab button, Hide Strategies tab button
+                    if (loginTabBtn) loginTabBtn.style.display = 'inline-block';
+                    if (stratTabBtn) stratTabBtn.style.display = 'none';
+                    
+                    // 2. Hide user profile pill
+                    if (userPill) userPill.style.display = 'none';
+
+                    // 3. Hide workspace & lock it
+                    if (stratWork) stratWork.style.display = 'none';
+                    if (lockWarn) lockWarn.style.display = 'block';
+                    if (tickers) tickers.style.display = 'none';
+
+                    // 4. Auto-route to login-pane if user was on strategy-pane
+                    if (activePaneId === 'strategy-pane' && isConnected) {
+                        switchPane('login-pane');
                     }
-                    if (sessTimeVal) {
-                        sessTimeVal.innerHTML = `<span style="color: var(--error);">Not Logged In</span>`;
-                    }
-                    if (sessBanner) {
-                        sessBanner.style.display = 'flex';
-                        if (sessMsg) {
-                            sessMsg.textContent = "Kotak Neo session is not authenticated. Please log in before deploying strategies.";
+
+                    if (sess.is_authenticated && !sess.is_valid_today) {
+                        if (bridgeVal) {
+                            bridgeVal.textContent = 'EXPIRED (Previous Session)';
+                            bridgeVal.style.color = '#d97706';
+                        }
+                        if (sessTimeVal) {
+                            sessTimeVal.innerHTML = `<span style="color: #d97706; font-weight: 600;">Logged in on ${sess.login_date} (Expired Overnight)</span>`;
+                        }
+                        if (sessBanner) {
+                            sessBanner.style.display = 'flex';
+                            if (sessMsg) {
+                                sessMsg.textContent = `Your session token from ${sess.login_date} has expired. Please log in before deploying strategies.`;
+                            }
+                        }
+                    } else {
+                        if (bridgeVal) {
+                            bridgeVal.textContent = 'DISCONNECTED';
+                            bridgeVal.style.color = 'var(--error)';
+                        }
+                        if (sessTimeVal) {
+                            sessTimeVal.innerHTML = `<span style="color: var(--error);">Not Logged In</span>`;
+                        }
+                        if (sessBanner) {
+                            sessBanner.style.display = 'flex';
+                            if (sessMsg) {
+                                sessMsg.textContent = "Kotak Neo session is not authenticated. Please log in before deploying strategies.";
+                            }
                         }
                     }
                     isConnected = false;

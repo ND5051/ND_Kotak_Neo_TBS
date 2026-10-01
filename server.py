@@ -1792,6 +1792,20 @@ def get_scrip_status():
         "error": scrip_error
     })
 
+@app.route("/api/logout", methods=["POST"])
+def logout_session():
+    global client_instance, session_info
+    client_instance = None
+    session_info = {
+        "is_authenticated": False,
+        "login_date": "",
+        "login_time": "",
+        "client_name": "",
+        "ucc": ""
+    }
+    add_app_log("Broker session disconnected by user.")
+    return jsonify({"success": True, "message": "Logged out successfully"})
+
 # OPTIONS MASTERS
 @app.route("/api/options/expiry", methods=["GET"])
 def get_option_expiries():
