@@ -483,6 +483,17 @@
             background: #475569;
         }
 
+        .logs-btn-action {
+            background: #059669;
+            color: #ffffff;
+            font-weight: 600;
+            padding: 3px 10px;
+        }
+
+        .logs-btn-action:hover {
+            background: #10b981;
+        }
+
         .logs-container {
             flex: 1;
             padding: 12px 24px;
@@ -860,11 +871,17 @@
         </div>
     </main>
 
-    <!-- Collapsible logs drawer with height controllers -->
+    <!-- Collapsible logs drawer with height controllers & download option -->
     <div class="logs-drawer" id="logs-drawer" style="height: 40px;">
         <div class="logs-header-bar" onclick="toggleLogsDrawer()">
-            <span>APPLICATION EVENT LOGS</span>
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <span>APPLICATION EVENT LOGS</span>
+                <span id="logs-counter-badge" style="background: rgba(52, 211, 153, 0.15); color: #34d399; font-size: 0.65rem; padding: 2px 7px; border-radius: 10px; font-weight: 600;">0 events</span>
+            </div>
             <div class="logs-controls" onclick="event.stopPropagation();">
+                <button class="logs-btn logs-btn-action" onclick="downloadApplicationLogs()" title="Download full application logs file to your computer">📥 Download Logs</button>
+                <button class="logs-btn" onclick="clearApplicationLogs()" title="Clear log window">🗑️ Clear</button>
+                <span style="color: #475569; margin: 0 4px;">|</span>
                 <button class="logs-btn" onclick="resizeLogs(40)">Min</button>
                 <button class="logs-btn" onclick="resizeLogs(300)">Med</button>
                 <button class="logs-btn" onclick="resizeLogs(600)">Max</button>
@@ -919,6 +936,36 @@
         function resizeLogs(height) {
             drawerHeight = height;
             document.getElementById('logs-drawer').style.height = `${height}px`;
+        }
+
+        // Trigger log file download from backend
+        function downloadApplicationLogs() {
+            const today = new Date().toISOString().split('T')[0];
+            const downloadUrl = `/api/logs/download?date=${today}`;
+            
+            // Create hidden download anchor
+            const a = document.createElement('a');
+            a.href = downloadUrl;
+            a.download = `ND_Kotak_Neo_TBS_Logs_${today}.txt`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            showBanner("Downloading application logs...", false);
+        }
+
+        // Clear in-memory logs
+        async function clearApplicationLogs() {
+            try {
+                const res = await fetch('/api/logs/clear', { method: 'POST' });
+                if (res.ok) {
+                    document.getElementById('logs-container-body').innerHTML = '<div style="color: #94a3b8;">[Log buffer cleared]</div>';
+                    const badge = document.getElementById('logs-counter-badge');
+                    if (badge) badge.textContent = '0 events';
+                    showBanner("Log window cleared (disk log files preserved)", false);
+                }
+            } catch (err) {
+                console.error("Failed to clear logs:", err);
+            }
         }
 
         // Show Toast Notifications
@@ -1136,6 +1183,11 @@
                 logsBody.innerHTML = data.logs.map(l => `<div>${l}</div>`).join('');
                 if (isScrolledToBottom || lastScrollTop === 0) {
                     logsBody.scrollTop = logsBody.scrollHeight;
+                }
+
+                const logsBadge = document.getElementById('logs-counter-badge');
+                if (logsBadge && data.logs) {
+                    logsBadge.textContent = `${data.logs.length} events`;
                 }
 
                 // 3. Render Saved strategies table updates

@@ -7,7 +7,8 @@ import threading
 import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from flask import Flask, request, jsonify, send_from_directory
+import io
+from flask import Flask, request, jsonify, send_from_directory, Response
 
 # Ensure UTF-8 output encoding on Windows consoles
 if hasattr(sys.stdout, "reconfigure"):
@@ -79,13 +80,27 @@ subscription_queue = []
 schedules_lock = threading.Lock()
 
 def add_app_log(message):
-    timestamp = get_now_ist().strftime("%H:%M:%S")
-    formatted = f"[{timestamp}] {message}"
+    now_dt = get_now_ist()
+    time_str = now_dt.strftime("%H:%M:%S")
+    full_ts = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    formatted = f"[{time_str}] {message}"
+    file_formatted = f"[{full_ts}] {message}\n"
     print(formatted)
+    
+    # 1. In-memory buffer for real-time frontend streaming (keep last 2000 events)
     with app_logs_lock:
         app_logs.append(formatted)
-        if len(app_logs) > 500:
+        if len(app_logs) > 2000:
             app_logs.pop(0)
+
+    # 2. Daily persistent log file on disk (crucial for AWS remote server debugging)
+    try:
+        date_str = now_dt.strftime("%Y-%m-%d")
+        daily_log_path = os.path.join(current_dir, f"tbs_app_{date_str}.log")
+        with open(daily_log_path, "a", encoding="utf-8") as f:
+            f.write(file_formatted)
+    except Exception:
+        pass
 
 # Load/Save saved strategies
 def load_strategies_from_disk():
@@ -367,21 +382,23 @@ def get_order_execution_details(order_id, max_retries=10, delay_sec=1.0):
 
     return None
 
-# Fetch net open quantity for a symbol directly from broker
-def get_broker_net_position(trading_symbol):
+# Fetch net open quantity for a symbol/token directly from broker
+def get_broker_net_position(trading_symbol, instrument_token=None):
     """
     Queries client_instance.positions() to determine the actual net quantity open at the broker.
+    Uses token-first exact matching, exact trading symbol comparison, and aggregates across
+    all matching slices/product-types to avoid premature square-off.
+    
     Returns:
-        int: Net open quantity (positive for Long, negative for Short, 0 if flat/confirmed closed),
-        or None if broker query failed or returned an unconfirmed/empty response.
+        int: Net open quantity (positive for Long, negative for Short, 0 if confirmed flat across all slices),
+        or None if broker query failed, returned unconfirmed/empty, or symbol/token not found.
     """
     global client_instance
     if client_instance is None or not trading_symbol:
         return None
     try:
         pos_res = client_instance.positions()
-        if not pos_res or isinstance(pos_res, dict) and ("Error" in pos_res or "error" in pos_res or "Error Message" in pos_res):
-            add_app_log(f"Notice: Broker positions API returned error response: {pos_res}")
+        if not pos_res or (isinstance(pos_res, dict) and ("Error" in pos_res or "error" in pos_res or "Error Message" in pos_res)):
             return None
 
         items = []
@@ -400,20 +417,23 @@ def get_broker_net_position(trading_symbol):
                         items = inner
                         break
             
-            # If still empty but dict has stat/status == "Ok" or "success", or no items found
             if not items and isinstance(pos_res.get("data"), list):
                 items = pos_res["data"]
 
-        target_sym = trading_symbol.strip().upper()
-        # Clean stripped target symbol (e.g. without spaces)
-        clean_target = "".join(target_sym.split())
+        if not items or not isinstance(items, list):
+            return None
 
-        found_symbol = False
+        target_sym = trading_symbol.strip().upper()
+        clean_target = "".join(target_sym.split())
+        target_token = str(instrument_token).strip() if instrument_token is not None else ""
+
+        matched_records = []
         for p in items:
             if not isinstance(p, dict):
                 continue
             
-            # Check all possible symbol keys in Kotak Neo positions
+            p_tok = str(p.get("tok") or p.get("token") or p.get("instrumentToken") or "").strip()
+            
             sym_raw = (
                 p.get("trdSym") 
                 or p.get("tradingSymbol") 
@@ -424,46 +444,61 @@ def get_broker_net_position(trading_symbol):
                 or ""
             )
             sym = "".join(str(sym_raw).strip().upper().split())
-            
-            # Also check if token matches
-            tok = str(p.get("tok") or p.get("token") or p.get("instrumentToken") or "")
-            
-            if sym == clean_target or clean_target in sym or sym in clean_target:
-                found_symbol = True
-                # Kotak Neo positions response keys for net qty
-                for q_key in ["netQty", "netQuantity", "flNetQty", "net_qty", "qty"]:
-                    raw_val = p.get(q_key)
-                    if raw_val is not None:
-                        try:
-                            return int(float(raw_val))
-                        except (ValueError, TypeError):
-                            pass
-                
-                # Fallback calculation if buy and sell quantities exist
+
+            # Token-first exact match, or EXACT symbol match (NO fuzzy substring matching)
+            is_match = False
+            if target_token and p_tok and target_token == p_tok:
+                is_match = True
+            elif sym and clean_target and sym == clean_target:
+                is_match = True
+
+            if is_match:
+                matched_records.append(p)
+
+        # CRITICAL SAFETY: If the instrument was not explicitly found in broker positions,
+        # return None! Absence of record != 0 open quantity.
+        if not matched_records:
+            return None
+
+        # Aggregate net quantities across all matching records (handles day vs carry-forward, MIS vs NRML slices)
+        total_net_qty = 0
+        has_valid_qty = False
+
+        for rec in matched_records:
+            rec_net = None
+            for q_key in ["netQty", "netQuantity", "flNetQty", "net_qty", "qty"]:
+                raw_val = rec.get(q_key)
+                if raw_val is not None:
+                    try:
+                        rec_net = int(float(raw_val))
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+            if rec_net is None:
+                # Fallback: buy_qty - sell_qty
                 buy_qty = 0.0
                 sell_qty = 0.0
                 for b_key in ["flBuyQty", "buyQty", "bQty", "totalBuyQty"]:
-                    if p.get(b_key) is not None:
+                    if rec.get(b_key) is not None:
                         try:
-                            buy_qty = float(p.get(b_key))
+                            buy_qty = float(rec.get(b_key))
                             break
                         except (ValueError, TypeError):
                             pass
                 for s_key in ["flSellQty", "sellQty", "sQty", "totalSellQty"]:
-                    if p.get(s_key) is not None:
+                    if rec.get(s_key) is not None:
                         try:
-                            sell_qty = float(p.get(s_key))
+                            sell_qty = float(rec.get(s_key))
                             break
                         except (ValueError, TypeError):
                             pass
-                            
-                return int(buy_qty - sell_qty)
+                rec_net = int(buy_qty - sell_qty)
 
-        # CRITICAL SAFETY: If items list was empty or symbol was not found in items,
-        # we CANNOT safely assume the position is closed! Only confirm 0 if the symbol
-        # was explicitly found in broker positions with netQty == 0.
-        # Returning None prevents accidental premature external square-off.
-        return None
+            total_net_qty += rec_net
+            has_valid_qty = True
+
+        return total_net_qty if has_valid_qty else None
     except Exception as e:
         add_app_log(f"Notice: Failed to fetch broker positions for {trading_symbol}: {e}")
         return None
@@ -947,6 +982,7 @@ def trigger_strategy_entry(strat):
                 # Apply market protection to limit price
                 entry_limit_price = apply_market_protection(entry_price, leg["position"], mp_val, mp_type)
                 formatted_entry_limit = f"{entry_limit_price:.2f}"
+                order_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_E{idx+1}"
                 
                 response = client_instance.place_order(
                     exchange_segment="nse_fo",
@@ -956,7 +992,8 @@ def trigger_strategy_entry(strat):
                     quantity=str(qty),
                     validity="DAY",
                     trading_symbol=symbol,
-                    transaction_type="B" if leg["position"] == "Buy" else "S"
+                    transaction_type="B" if leg["position"] == "Buy" else "S",
+                    tag=order_tag
                 )
                 
                 # Check for broker acceptance
@@ -1057,8 +1094,8 @@ def trigger_strategy_entry(strat):
                 try:
                     sl_txn_type = "S" if leg["position"] == "Buy" else "B"
                     formatted_sl_trigger = f"{sl_price:.2f}"
-                    # For SL orders, Limit price matches trigger price (clean SL at exact configured level without MP buffer)
                     formatted_sl_limit = f"{sl_price:.2f}"
+                    sl_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_SL{idx+1}"
 
                     sl_res = client_instance.place_order(
                         exchange_segment="nse_fo",
@@ -1069,7 +1106,8 @@ def trigger_strategy_entry(strat):
                         quantity=str(qty),
                         validity="DAY",
                         trading_symbol=symbol,
-                        transaction_type=sl_txn_type
+                        transaction_type=sl_txn_type,
+                        tag=sl_tag
                     )
                     
                     ord_no = sl_res.get("nOrdNo") if isinstance(sl_res, dict) else None
@@ -1129,6 +1167,7 @@ def trigger_strategy_entry(strat):
             if mode == "Real":
                 try:
                     formatted_tgt_price = f"{tgt_price:.2f}"
+                    tgt_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_T{idx+1}"
                     tgt_res = client_instance.place_order(
                         exchange_segment="nse_fo",
                         product=strat["product_type"],
@@ -1137,7 +1176,8 @@ def trigger_strategy_entry(strat):
                         quantity=str(qty),
                         validity="DAY",
                         trading_symbol=symbol,
-                        transaction_type="S" if leg["position"] == "Buy" else "B"
+                        transaction_type="S" if leg["position"] == "Buy" else "B",
+                        tag=tgt_tag
                     )
                     ord_no = tgt_res.get("nOrdNo") if isinstance(tgt_res, dict) else None
                     if ord_no:
@@ -1198,11 +1238,13 @@ def trigger_strategy_entry(strat):
             "stop_loss_type": sl_type,
             "sl_price": sl_price,
             "sl_order_id": sl_order_id,
+            "entry_time_epoch": time.time(),
             "status": "Active" # Active, Target Hit, SL Hit, Squared Off
         })
 
     # Only activate strategy if at least one leg executed successfully
     if len(deployment["legs"]) > 0:
+        deployment["entry_time_epoch"] = time.time()
         strat["status"] = "Active"
         active_deployments[strat_id] = deployment
         add_app_log(f"✓ Strategy {strat['name']} is now Active ({len(deployment['legs'])} legs active).")
@@ -1340,26 +1382,48 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
                 add_app_log(f"🔔 Exchange Fill Detected: Broker SL order {leg['sl_order_id']} for {leg['symbol']} was FILLED at ₹{sl_fill_price:.2f}.")
 
         # 2. Check if position was closed externally (User manual square-off on phone/web or RMS)
+        # CRITICAL GUARDS:
+        # a) Grace period: Never auto-exit within the first 120 seconds of entry to give broker position caches time to settle
+        # b) Debounce: Require 30 consecutive 1-second cycles (30s) of confirmed 0-qty before reconciling
+        # c) Order verification: Confirm our SL order was NOT filled before assuming external closure
+        now_epoch = time.time()
+        entry_epoch = leg.get("entry_time_epoch") or deploy.get("entry_time_epoch") or now_epoch
+        seconds_since_entry = now_epoch - entry_epoch
+
         if mode == "Real" and not sl_hit:
-            broker_net = get_broker_net_position(leg["symbol"])
-            if broker_net is not None and broker_net == 0:
-                # Require 3 consecutive confirmations across monitoring cycles before auto-exiting
-                zero_count = leg.get("_zero_pos_count", 0) + 1
-                leg["_zero_pos_count"] = zero_count
-                if zero_count >= 3:
-                    add_app_log(f"⚠️ External Square-off Confirmed: Broker net open position for {leg['symbol']} confirmed 0 across 3 checks. Reconciling TBS state.")
-                    # Auto-cancel any remaining pending orders for this leg so they don't fire later
-                    if leg.get("sl_order_id"):
-                        cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
-                    if leg.get("tgt_order_id"):
-                        cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
-                    leg["status"] = "Completed (External Exit)"
-                    leg["exit_price"] = current_price
-                    for pos in positions:
-                        if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
-                            pos["qty"] = 0
-                    continue
+            if seconds_since_entry > 120: # 2-minute post-entry settlement grace period
+                broker_net = get_broker_net_position(leg["symbol"], leg.get("token"))
+                if broker_net is not None and broker_net == 0:
+                    zero_count = leg.get("_zero_pos_count", 0) + 1
+                    leg["_zero_pos_count"] = zero_count
+                    if zero_count >= 30: # 30 consecutive seconds of confirmed 0 position
+                        # Verify SL order didn't complete right before this
+                        sl_filled = False
+                        if leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+                            chk_sl = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
+                            if chk_sl and chk_sl.get("status") == "complete":
+                                sl_filled = True
+                                sl_hit = True
+                                sl_fill_price = chk_sl.get("avg_price") or current_price
+                                add_app_log(f"🔔 Exchange Fill Detected on SL Check: SL order {leg['sl_order_id']} for {leg['symbol']} was FILLED at ₹{sl_fill_price:.2f}.")
+
+                        if not sl_filled:
+                            add_app_log(f"⚠️ External Square-off Confirmed: Broker net open position for {leg['symbol']} confirmed 0 across 30 consecutive checks. Reconciling TBS state.")
+                            # Auto-cancel any remaining pending orders for this leg so they don't fire later
+                            if leg.get("sl_order_id"):
+                                cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                            if leg.get("tgt_order_id"):
+                                cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
+                            leg["status"] = "Completed (External Exit)"
+                            leg["exit_price"] = current_price
+                            for pos in positions:
+                                if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
+                                    pos["qty"] = 0
+                            continue
+                else:
+                    leg["_zero_pos_count"] = 0
             else:
+                # Reset counter during initial grace period
                 leg["_zero_pos_count"] = 0
 
         
@@ -1481,7 +1545,7 @@ def square_off_leg(strat, leg, exit_price, reason):
 
         # Check C: Net broker position reconciliation check before placing ANY market/limit exit order
         if need_broker_exit:
-            broker_net_qty = get_broker_net_position(leg["symbol"])
+            broker_net_qty = get_broker_net_position(leg["symbol"], leg.get("token"))
             if broker_net_qty is not None and broker_net_qty == 0:
                 need_broker_exit = False
                 add_app_log(f"🛡️ Safety Guard: Broker net open quantity for {leg['symbol']} is 0 (already closed externally or via SL). Skipped placing redundant exit order.")
@@ -1498,6 +1562,7 @@ def square_off_leg(strat, leg, exit_price, reason):
     exit_order_id = f"SIM_EXIT_{int(time.time()*1000)}"
     if mode == "Real" and need_broker_exit:
         try:
+            sq_tag = f"TBS_{strat['name'][:6].replace(' ', '')}_EXIT"
             response = client_instance.place_order(
                 exchange_segment="nse_fo",
                 product=strat["product_type"],
@@ -1506,7 +1571,8 @@ def square_off_leg(strat, leg, exit_price, reason):
                 quantity=str(leg["qty"]),
                 validity="DAY",
                 trading_symbol=leg["symbol"],
-                transaction_type=exit_txn_type
+                transaction_type=exit_txn_type,
+                tag=sq_tag
             )
             ord_no = response.get("nOrdNo") if isinstance(response, dict) else None
             if ord_no:
@@ -1590,6 +1656,47 @@ scheduler_thread.start()
 @app.route("/")
 def serve_index():
     return send_from_directory(current_dir, "index.html")
+
+@app.route("/api/logs/download", methods=["GET"])
+def download_logs():
+    """
+    Downloads full application logs as a .txt file.
+    Supports ?date=YYYY-MM-DD to download historical day logs,
+    or downloads all combined in-memory logs by default.
+    """
+    date_arg = request.args.get("date", "").strip()
+    if not date_arg:
+        date_arg = get_now_ist().strftime("%Y-%m-%d")
+
+    daily_log_path = os.path.join(current_dir, f"tbs_app_{date_arg}.log")
+    
+    content = ""
+    if os.path.exists(daily_log_path):
+        try:
+            with open(daily_log_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            content = f"Error reading log file: {e}\n"
+    
+    # Fallback / merge with current in-memory logs if disk file was empty
+    if not content:
+        with app_logs_lock:
+            content = "\n".join(app_logs)
+
+    filename = f"ND_Kotak_Neo_TBS_Logs_{date_arg}.txt"
+    return Response(
+        content,
+        mimetype="text/plain",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.route("/api/logs/clear", methods=["POST"])
+def clear_in_memory_logs():
+    """Clears frontend in-memory log buffer without removing disk log files."""
+    with app_logs_lock:
+        app_logs.clear()
+    add_app_log("Frontend log buffer cleared by user.")
+    return jsonify({"success": True})
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
