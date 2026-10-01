@@ -86,6 +86,7 @@ logs/
 # Local strategy state
 strategies.json
 
-# Local enhancement tracking
+# Local enhancement and architecture tracking
 future_enhancement_ideas.md
+TBS_ARCHITECTURE_AND_LESSONS_LEARNED.md
 
