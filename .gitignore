@@ -57,6 +57,11 @@ venv.bak/
 .env
 .env.*
 !.env.example
+credentials.json
+service_account.json
+google_creds.json
+nd-kotakneo-tbs-trading-bot-googlesheet.json
+*.json.secret
 
 # IDEs and Editors
 .vscode/

@@ -102,6 +102,127 @@ def add_app_log(message):
     except Exception:
         pass
 
+# =====================================================================
+# GOOGLE SHEETS ASYNC LOGGING ENGINE
+# =====================================================================
+GSHEET_KEY_FILE = os.path.join(current_dir, "nd-kotakneo-tbs-trading-bot-googlesheet.json")
+GSHEET_ID = "1j4UjAPgLwgl_N5KtWszKEt0lV-azcUGblFX2wOhAxk8"
+_gsheet_client = None
+_gsheet_lock = threading.Lock()
+
+def get_gsheet_spreadsheet():
+    """Lazily authenticates and returns the Google Spreadsheet instance."""
+    global _gsheet_client
+    if not os.path.exists(GSHEET_KEY_FILE):
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        if _gsheet_client is None:
+            scopes = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            creds = Credentials.from_service_account_file(GSHEET_KEY_FILE, scopes=scopes)
+            _gsheet_client = gspread.authorize(creds)
+        return _gsheet_client.open_by_key(GSHEET_ID)
+    except Exception as e:
+        add_app_log(f"Notice: Google Sheets connection error: {e}")
+        return None
+
+def async_log_order_to_gsheet(order_data):
+    """
+    Appends an executed order row to 'Real_Order_Log' or 'Paper_Order_Log' based on trade mode.
+    Columns: Date | Time (IST) | Strategy Name | Trade Mode | Leg | Symbol | Order Type | Quantity | Price (Rs) | Order Status | Order ID
+    """
+    def _worker():
+        with _gsheet_lock:
+            try:
+                sh = get_gsheet_spreadsheet()
+                if not sh:
+                    return
+                mode = order_data.get("mode", "Paper")
+                tab_name = "Real_Order_Log" if mode == "Real" else "Paper_Order_Log"
+                ws = sh.worksheet(tab_name)
+                
+                # Format time & date
+                now_ist = get_now_ist()
+                date_str = now_ist.strftime("%Y-%m-%d")
+                time_str = now_ist.strftime("%H:%M:%S")
+                
+                row = [
+                    date_str,
+                    time_str,
+                    order_data.get("strategy_name", ""),
+                    mode,
+                    f"Leg #{int(order_data.get('leg_idx', 0)) + 1}",
+                    order_data.get("symbol", ""),
+                    order_data.get("type", ""),
+                    order_data.get("qty", 0),
+                    float(order_data.get("price", 0.0) or 0.0),
+                    order_data.get("status", ""),
+                    str(order_data.get("order_id", ""))
+                ]
+                ws.append_row(row)
+                add_app_log(f"📊 Order logged to Google Sheet ({tab_name}): {order_data.get('symbol')} ({order_data.get('type')})")
+            except Exception as e:
+                add_app_log(f"Notice: Failed to append order to Google Sheet: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+def async_log_strategy_summary_to_gsheet(strat, deployment, exit_reason="Completed"):
+    """
+    Appends a completed strategy summary to 'Real_Strategy_Summary' or 'Paper_Strategy_Summary' based on trade mode.
+    Columns: Date | Strategy Name | Trade Mode | Entry Time | Exit Time | Legs Count | Exit Reason | Total Net PnL (Rs) | Legs Breakdown
+    """
+    def _worker():
+        with _gsheet_lock:
+            try:
+                sh = get_gsheet_spreadsheet()
+                if not sh:
+                    return
+                mode = strat.get("trade_type", "Paper")
+                tab_name = "Real_Strategy_Summary" if mode == "Real" else "Paper_Strategy_Summary"
+                ws = sh.worksheet(tab_name)
+                
+                now_ist = get_now_ist()
+                date_str = now_ist.strftime("%Y-%m-%d")
+                exit_time_str = now_ist.strftime("%H:%M:%S")
+                entry_time_str = deployment.get("entry_time_actual", "") or strat.get("entry_time", "")
+                
+                legs = deployment.get("legs", [])
+                total_pnl = 0.0
+                legs_breakdown = []
+                
+                for l in legs:
+                    ep = float(l.get("entry_price", 0.0) or 0.0)
+                    xp = float(l.get("exit_price", 0.0) or ep)
+                    q = int(l.get("qty", 0) or 0)
+                    is_sell = (l.get("position") == "Sell")
+                    mult = -1 if is_sell else 1
+                    leg_pnl = round((xp - ep) * q * mult, 2)
+                    total_pnl += leg_pnl
+                    legs_breakdown.append(f"{l.get('symbol')}: Entry ₹{ep:.2f} | Exit ₹{xp:.2f} | PnL ₹{leg_pnl:+.2f} ({l.get('status')})")
+                
+                total_pnl = round(total_pnl, 2)
+                row = [
+                    date_str,
+                    strat.get("name", ""),
+                    mode,
+                    entry_time_str,
+                    exit_time_str,
+                    len(legs),
+                    exit_reason,
+                    total_pnl,
+                    " ; ".join(legs_breakdown)
+                ]
+                ws.append_row(row)
+                add_app_log(f"📊 Strategy summary logged to Google Sheet ({tab_name}): {strat.get('name')} (PnL: ₹{total_pnl:+.2f})")
+            except Exception as e:
+                add_app_log(f"Notice: Failed to append strategy summary to Google Sheet: {e}")
+
+    threading.Thread(target=_worker, daemon=True).start()
+
 # Load/Save saved strategies
 def load_strategies_from_disk():
     global strategies_cache
@@ -176,16 +297,40 @@ def resolve_dynamic_expiry(expiry_str):
     active_expiries.sort(key=lambda x: x[0])
     
     # Handle aliases
-    exp_upper = str(expiry_str).upper().strip()
-    if exp_upper in ["CURRENT_WEEK", "CURRENT WEEK", "THIS_WEEK", "THIS WEEK"]:
+    exp_upper = str(expiry_str).upper().strip().replace(" ", "_").replace("-", "_")
+    
+    # 1. Weekly Aliases (Chronological index 0 to 4)
+    if exp_upper in ["CURRENT_WEEK", "THIS_WEEK"]:
         return active_expiries[0][1]
-    elif exp_upper in ["NEXT_WEEK", "NEXT WEEK"]:
+    elif exp_upper == "NEXT_WEEK":
         return active_expiries[1][1] if len(active_expiries) > 1 else active_expiries[0][1]
-    elif exp_upper in ["MONTH_END", "MONTH END", "MONTHLY"]:
-        # Find the last Thursday of the current active month
-        first_exp_month = active_expiries[0][0].month
-        same_month = [x for x in active_expiries if x[0].month == first_exp_month]
-        return same_month[-1][1] if same_month else active_expiries[0][1]
+    elif exp_upper in ["NEXT_TO_NEXT_WEEK", "NEXT_TO_NEXT", "3RD_WEEK"]:
+        return active_expiries[2][1] if len(active_expiries) > 2 else active_expiries[-1][1]
+    elif exp_upper in ["4TH_WEEK", "FOURTH_WEEK"]:
+        return active_expiries[3][1] if len(active_expiries) > 3 else active_expiries[-1][1]
+    elif exp_upper in ["5TH_WEEK", "FIFTH_WEEK"]:
+        return active_expiries[4][1] if len(active_expiries) > 4 else active_expiries[-1][1]
+
+    # 2. Monthly Aliases (Group active expiries by distinct year-month, take last expiry of each month)
+    # Collect distinct calendar months in chronological order
+    months_seen = []
+    month_groups = {}
+    for d, exp in active_expiries:
+        ym = (d.year, d.month)
+        if ym not in month_groups:
+            months_seen.append(ym)
+            month_groups[ym] = []
+        month_groups[ym].append((d, exp))
+
+    # Monthly expiry is the last expiry of that month
+    monthly_expiries = [month_groups[ym][-1][1] for ym in months_seen if month_groups[ym]]
+
+    if exp_upper in ["NEAR_MONTH", "MONTH_END", "MONTHLY", "CURRENT_MONTH"]:
+        return monthly_expiries[0] if len(monthly_expiries) > 0 else active_expiries[0][1]
+    elif exp_upper in ["NEXT_MONTH"]:
+        return monthly_expiries[1] if len(monthly_expiries) > 1 else (monthly_expiries[0] if monthly_expiries else active_expiries[0][1])
+    elif exp_upper in ["FAR_MONTH"]:
+        return monthly_expiries[2] if len(monthly_expiries) > 2 else (monthly_expiries[-1] if monthly_expiries else active_expiries[-1][1])
 
     # If the user saved a specific date, check if it's still valid (>= today).
     # If it is in the past, roll it forward to current week!
@@ -274,6 +419,66 @@ def find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type)
     fallback = pool[0] if pool else candidates[0]
     add_app_log(f"⚠️ Quotes unavailable for {option_type} candidates; default fallback to {fallback.get('pTrdSymbol')}")
     return fallback, 0.0
+
+def find_recent_broker_order(trading_symbol, transaction_type, quantity, max_age_seconds=60):
+    """
+    Reconciles an order from the broker's order book when place_order() timed out
+    over HTTP (e.g. gateway delay) but may have actually reached and been processed by the broker.
+    Searches the most recent orders matching symbol, transaction type, and quantity placed within max_age_seconds.
+    """
+    global client_instance
+    if client_instance is None or not trading_symbol:
+        return None
+    try:
+        report_res = client_instance.order_report()
+        orders = []
+        if isinstance(report_res, list):
+            orders = report_res
+        elif isinstance(report_res, dict):
+            data_field = report_res.get("data")
+            if isinstance(data_field, list):
+                orders = data_field
+            elif isinstance(data_field, dict):
+                inner = data_field.get("data") or data_field.get("result") or []
+                if isinstance(inner, list):
+                    orders = inner
+        
+        if not orders:
+            return None
+
+        clean_target_sym = "".join(str(trading_symbol).strip().upper().split())
+        target_tt = "B" if transaction_type in ["B", "BUY", "Buy"] else "S"
+        target_qty = int(quantity)
+        now_dt = get_now_ist()
+
+        for rec in reversed(orders):
+            if not isinstance(rec, dict):
+                continue
+            sym_raw = rec.get("trdSym") or rec.get("tradingSymbol") or rec.get("sym") or rec.get("dispSym") or ""
+            rec_sym = "".join(str(sym_raw).strip().upper().split())
+            if rec_sym != clean_target_sym:
+                continue
+            
+            rec_tt = str(rec.get("trnsTp") or rec.get("transactionType") or rec.get("tt") or "").strip().upper()
+            if rec_tt and rec_tt[0] != target_tt:
+                continue
+
+            try:
+                rec_qty = int(float(rec.get("qty") or rec.get("quantity") or rec.get("fldQty") or 0))
+                if rec_qty > 0 and rec_qty != target_qty:
+                    continue
+            except (ValueError, TypeError):
+                pass
+
+            # Check time if available to ensure it belongs to this execution
+            ord_time_str = str(rec.get("ordDtTm") or rec.get("orderTime") or rec.get("nOrdNo") or "")
+            ord_no = rec.get("nOrdNo") or rec.get("orderId") or rec.get("order_id")
+            if ord_no:
+                add_app_log(f"🔍 Reconciled recent broker order {ord_no} for {trading_symbol} after placement timeout.")
+                return str(ord_no)
+    except Exception as ex:
+        add_app_log(f"Notice: Failed to query order book for post-timeout reconciliation: {ex}")
+    return None
 
 # Fetch actual execution fill details from broker (queries order_report and order_history)
 def get_order_execution_details(order_id, max_retries=10, delay_sec=1.0):
@@ -1033,21 +1238,69 @@ def trigger_strategy_entry(strat):
                     if "Invalid session" in str(err_text) or response.get("stCode") == 100022:
                         session_info["is_authenticated"] = False
                         add_app_log("⚠️ Kotak Neo session token has EXPIRED. Please log in again from the Login tab.")
-                    entry_order_id = f"ERR_{int(time.time()*1000)}"
-                    order_status = f"Failed (Broker: {err_text})"
-                    entry_success = False
-                    add_app_log(f"Real Entry Order Rejected on placement: {response}")
+                    
+                    # TIMEOUT RECONCILIATION: Check if broker actually registered the order despite timeout
+                    reconciled_id = None
+                    if "timeout" in str(err_text).lower():
+                        add_app_log(f"⚠️ Entry placement timed out for {symbol}. Checking broker order book to verify if order landed...")
+                        time.sleep(2.0)
+                        reconciled_id = find_recent_broker_order(symbol, "B" if leg["position"] == "Buy" else "S", qty)
+
+                    if reconciled_id:
+                        entry_order_id = reconciled_id
+                        add_app_log(f"✓ Successfully reconciled timed-out entry order {entry_order_id} from broker book!")
+                        details = get_order_execution_details(entry_order_id, max_retries=10, delay_sec=1.0)
+                        if details and details.get("status") == "complete":
+                            if details.get("avg_price"):
+                                entry_price = details["avg_price"]
+                            order_status = "Executed"
+                            entry_success = True
+                        elif details and details.get("status") == "rejected":
+                            order_status = f"Failed (Broker Rejected: {details.get('rej_reason')})"
+                            entry_success = False
+                        else:
+                            order_status = f"Status Unknown ({details.get('raw_status') if details else 'None'})"
+                            entry_success = False
+                    else:
+                        entry_order_id = f"ERR_{int(time.time()*1000)}"
+                        order_status = f"Failed (Broker: {err_text})"
+                        entry_success = False
+                        add_app_log(f"Real Entry Order Rejected on placement: {response}")
             except Exception as e:
                 if "Invalid session" in str(e) or "100022" in str(e):
                     session_info["is_authenticated"] = False
                     add_app_log("⚠️ Kotak Neo session token has EXPIRED. Please log in again from the Login tab.")
-                add_app_log(f"Real Entry Order Placement Exception: {e}")
-                entry_order_id = f"ERR_{int(time.time()*1000)}"
-                order_status = f"Failed ({str(e)})"
-                entry_success = False
+                
+                # Check for timeout exception reconciliation
+                reconciled_id = None
+                if "timeout" in str(e).lower():
+                    add_app_log(f"⚠️ Entry placement exception timed out for {symbol}. Checking broker order book to verify if order landed...")
+                    time.sleep(2.0)
+                    reconciled_id = find_recent_broker_order(symbol, "B" if leg["position"] == "Buy" else "S", qty)
+
+                if reconciled_id:
+                    entry_order_id = reconciled_id
+                    add_app_log(f"✓ Successfully reconciled timed-out entry order {entry_order_id} from broker book after exception!")
+                    details = get_order_execution_details(entry_order_id, max_retries=10, delay_sec=1.0)
+                    if details and details.get("status") == "complete":
+                        if details.get("avg_price"):
+                            entry_price = details["avg_price"]
+                        order_status = "Executed"
+                        entry_success = True
+                    elif details and details.get("status") == "rejected":
+                        order_status = f"Failed (Broker Rejected: {details.get('rej_reason')})"
+                        entry_success = False
+                    else:
+                        order_status = f"Status Unknown ({details.get('raw_status') if details else 'None'})"
+                        entry_success = False
+                else:
+                    add_app_log(f"Real Entry Order Placement Exception: {e}")
+                    entry_order_id = f"ERR_{int(time.time()*1000)}"
+                    order_status = f"Failed ({str(e)})"
+                    entry_success = False
 
         # Record Entry Order log
-        orders_log.append({
+        entry_log_entry = {
             "order_id": entry_order_id,
             "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "strategy_name": strat["name"],
@@ -1058,7 +1311,9 @@ def trigger_strategy_entry(strat):
             "price": entry_price,
             "mode": mode,
             "status": order_status
-        })
+        }
+        orders_log.append(entry_log_entry)
+        async_log_order_to_gsheet(entry_log_entry)
 
         # STRICT GUARD: If primary entry did not execute completely, skip SL, Target, and Position registration
         if not entry_success:
@@ -1115,18 +1370,34 @@ def trigger_strategy_entry(strat):
                         add_app_log(f"Real SL Order Placed with broker ({sl_order_id}) trigger: {formatted_sl_trigger}, limit: {formatted_sl_limit}")
                     else:
                         err_text = sl_res.get("errMsg") or (sl_res.get("error") if isinstance(sl_res, dict) else str(sl_res))
-                        sl_order_id = f"SL_REJ_{int(time.time()*1000)}"
-                        sl_status = f"Failed (Broker: {err_text})"
-                        add_app_log(f"Real SL Order Rejected by Broker: {sl_res}")
+                        reconciled_sl_id = None
+                        if "timeout" in str(err_text).lower():
+                            time.sleep(2.0)
+                            reconciled_sl_id = find_recent_broker_order(symbol, sl_txn_type, qty)
+                        if reconciled_sl_id:
+                            sl_order_id = reconciled_sl_id
+                            add_app_log(f"✓ Reconciled timed-out SL order {sl_order_id} from broker book.")
+                        else:
+                            sl_order_id = f"SL_REJ_{int(time.time()*1000)}"
+                            sl_status = f"Failed (Broker: {err_text})"
+                            add_app_log(f"Real SL Order Rejected by Broker: {sl_res}")
                 except Exception as e:
-                    add_app_log(f"Error placing real SL order: {e}")
-                    sl_order_id = f"SL_ERR_{int(time.time()*1000)}"
-                    sl_status = f"Failed ({str(e)})"
+                    reconciled_sl_id = None
+                    if "timeout" in str(e).lower():
+                        time.sleep(2.0)
+                        reconciled_sl_id = find_recent_broker_order(symbol, sl_txn_type, qty)
+                    if reconciled_sl_id:
+                        sl_order_id = reconciled_sl_id
+                        add_app_log(f"✓ Reconciled timed-out SL order {sl_order_id} from broker book after exception.")
+                    else:
+                        add_app_log(f"Error placing real SL order: {e}")
+                        sl_order_id = f"SL_ERR_{int(time.time()*1000)}"
+                        sl_status = f"Failed ({str(e)})"
             else:
                 sl_order_id = f"SIM_SL_{int(time.time()*1000)}"
                 add_app_log(f"Paper SL Limit Order Placed ({sl_order_id}) trigger/price {sl_price:.2f}")
 
-            orders_log.append({
+            sl_log_entry = {
                 "order_id": sl_order_id,
                 "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                 "strategy_name": strat["name"],
@@ -1137,7 +1408,9 @@ def trigger_strategy_entry(strat):
                 "price": sl_price,
                 "mode": mode,
                 "status": sl_status
-            })
+            }
+            orders_log.append(sl_log_entry)
+            async_log_order_to_gsheet(sl_log_entry)
 
         # Calculate and Place Target Order (Limit Order)
         tgt_price = 0.0
@@ -1195,7 +1468,7 @@ def trigger_strategy_entry(strat):
                 tgt_order_id = f"SIM_TGT_{int(time.time()*1000)}"
                 add_app_log(f"Paper Target Limit Order Placed ({tgt_order_id}) at {tgt_price:.2f}")
 
-            orders_log.append({
+            tgt_log_entry = {
                 "order_id": tgt_order_id,
                 "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
                 "strategy_name": strat["name"],
@@ -1206,7 +1479,9 @@ def trigger_strategy_entry(strat):
                 "price": tgt_price,
                 "mode": mode,
                 "status": tgt_status
-            })
+            }
+            orders_log.append(tgt_log_entry)
+            async_log_order_to_gsheet(tgt_log_entry)
 
         # Record position ONLY after confirmed entry fill
         pos_record = {
@@ -1472,9 +1747,14 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
     # If all legs are completed, clean up active deployment
     if active_legs_count == 0 or time_exit:
         strat["status"] = "Completed"
-        active_deployments.pop(strat_id, None)
+        completed_dep = active_deployments.pop(strat_id, None)
         save_strategies_to_disk()
         add_app_log(f"Strategy {strat['name']} completed execution.")
+        
+        # Log Completed Strategy Summary to Google Sheets (for both Real & Paper trades)
+        if completed_dep:
+            exit_reason_summary = "Time Exit" if time_exit else "All Legs Squared Off"
+            async_log_strategy_summary_to_gsheet(strat, completed_dep, exit_reason=exit_reason_summary)
 
 def square_off_leg(strat, leg, exit_price, reason):
     global positions, orders_log
@@ -1597,14 +1877,32 @@ def square_off_leg(strat, leg, exit_price, reason):
                     order_status = "Executed"
             else:
                 err_text = response.get("errMsg") or (response.get("error") if isinstance(response, dict) else str(response))
-                order_status = f"Failed (Broker: {err_text})"
-                add_app_log(f"Real Square-off Order Rejected: {response}")
+                reconciled_exit_id = None
+                if "timeout" in str(err_text).lower():
+                    time.sleep(2.0)
+                    reconciled_exit_id = find_recent_broker_order(leg["symbol"], exit_txn_type, leg["qty"])
+                if reconciled_exit_id:
+                    exit_order_id = reconciled_exit_id
+                    order_status = "Executed"
+                    add_app_log(f"✓ Reconciled square-off order {exit_order_id} from broker book after timeout.")
+                else:
+                    order_status = f"Failed (Broker: {err_text})"
+                    add_app_log(f"Real Square-off Order Rejected: {response}")
         except Exception as e:
-            add_app_log(f"Real Squareoff Exception: {e}")
-            order_status = f"Failed ({str(e)})"
+            reconciled_exit_id = None
+            if "timeout" in str(e).lower():
+                time.sleep(2.0)
+                reconciled_exit_id = find_recent_broker_order(leg["symbol"], exit_txn_type, leg["qty"])
+            if reconciled_exit_id:
+                exit_order_id = reconciled_exit_id
+                order_status = "Executed"
+                add_app_log(f"✓ Reconciled square-off order {exit_order_id} from broker book after exception.")
+            else:
+                add_app_log(f"Real Squareoff Exception: {e}")
+                order_status = f"Failed ({str(e)})"
 
     if need_broker_exit:
-        orders_log.append({
+        exit_log_entry = {
             "order_id": exit_order_id,
             "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
             "strategy_name": strat["name"],
@@ -1615,7 +1913,9 @@ def square_off_leg(strat, leg, exit_price, reason):
             "price": exit_price,
             "mode": mode,
             "status": f"{order_status} ({reason})" if not order_status.startswith("Failed") else order_status
-        })
+        }
+        orders_log.append(exit_log_entry)
+        async_log_order_to_gsheet(exit_log_entry)
 
     # Zero out position
     for pos in positions:
@@ -1736,7 +2036,7 @@ def login():
 
     try:
         from neo_api_client import NeoAPI
-        client = NeoAPI(consumer_key=consumer_key, environment="prod")
+        client = NeoAPI(consumer_key=consumer_key, environment="prod", timeout=45)
         add_app_log(f"Attempting TOTP login for UCC {ucc}...")
         login_response = client.totp_login(mobile_number=mobile_number, ucc=ucc, totp=totp_code)
 
@@ -1834,41 +2134,65 @@ def get_option_expiries():
             active_expiries, 
             key=lambda d: datetime.strptime(d, "%d%b%Y")
         )
-        
-        # Build enriched expiry options with friendly labels
-        enriched_expiries = []
-        for idx, exp in enumerate(sorted_expiries):
+
+        # Helper to format display date (e.g. 13-Oct-26)
+        def fmt_display(exp_str):
             try:
-                exp_dt = datetime.strptime(exp, "%d%b%Y")
-                display_date = exp_dt.strftime("%d %b %y")
+                dt = datetime.strptime(exp_str, "%d%b%Y")
+                return dt.strftime("%d-%b-%y")
             except Exception:
-                display_date = exp
+                return exp_str
 
-            if idx == 0:
-                label = f"Current Week ({display_date})"
-                value = "CURRENT_WEEK"
-            elif idx == 1:
-                label = f"Next Week ({display_date})"
-                value = "NEXT_WEEK"
-            else:
-                # Check if it is month end (last Thursday/expiry of its month)
-                try:
-                    exp_dt = datetime.strptime(exp, "%d%b%Y")
-                    month_exps = [e for e in sorted_expiries if datetime.strptime(e, "%d%b%Y").month == exp_dt.month]
-                    is_last_in_month = (month_exps and month_exps[-1] == exp)
-                    if is_last_in_month:
-                        label = f"Month End ({display_date})"
-                    else:
-                        label = f"Far Expiry ({display_date})"
-                except Exception:
-                    label = f"Expiry ({display_date})"
-                value = exp
+        # 1. Build weekly expiries list (up to 5 weeks)
+        weekly_defs = [
+            ("CURRENT_WEEK", "Current Week"),
+            ("NEXT_WEEK", "Next Week"),
+            ("NEXT_TO_NEXT_WEEK", "Next to Next Week"),
+            ("4TH_WEEK", "4th Week"),
+            ("5TH_WEEK", "5th Week"),
+        ]
+        
+        enriched_expiries = []
+        for idx, (val_alias, label_prefix) in enumerate(weekly_defs):
+            if idx < len(sorted_expiries):
+                actual_exp = sorted_expiries[idx]
+                disp = fmt_display(actual_exp)
+                enriched_expiries.append({
+                    "value": val_alias,
+                    "label": f"{label_prefix} ({disp})",
+                    "actual_date": actual_exp
+                })
 
-            enriched_expiries.append({
-                "value": value,
-                "label": label,
-                "actual_date": exp
-            })
+        # 2. Build monthly expiries (last expiry of each distinct calendar month)
+        months_seen = []
+        month_groups = {}
+        for exp in sorted_expiries:
+            try:
+                d = datetime.strptime(exp, "%d%b%Y").date()
+                ym = (d.year, d.month)
+                if ym not in month_groups:
+                    months_seen.append(ym)
+                    month_groups[ym] = []
+                month_groups[ym].append(exp)
+            except Exception:
+                pass
+
+        monthly_exp_dates = [month_groups[ym][-1] for ym in months_seen if month_groups[ym]]
+        monthly_defs = [
+            ("NEAR_MONTH", "Near Month"),
+            ("NEXT_MONTH", "Next Month"),
+            ("FAR_MONTH", "Far Month"),
+        ]
+
+        for idx, (val_alias, label_prefix) in enumerate(monthly_defs):
+            if idx < len(monthly_exp_dates):
+                actual_exp = monthly_exp_dates[idx]
+                disp = fmt_display(actual_exp)
+                enriched_expiries.append({
+                    "value": val_alias,
+                    "label": f"{label_prefix} ({disp})",
+                    "actual_date": actual_exp
+                })
 
         # Fetch lot size dynamically from scrip master
         lot_size = 65 # default Nifty fallback
@@ -1877,8 +2201,8 @@ def get_option_expiries():
             
         return jsonify({
             "success": True, 
-            "expiries": sorted_expiries, # backwards compatibility list of string dates
-            "expiry_options": enriched_expiries, # enriched objects
+            "expiries": [x["actual_date"] for x in enriched_expiries], # active reference list
+            "expiry_options": enriched_expiries, # exactly the curated 8 options
             "lot_size": lot_size
         })
     except Exception as e:
@@ -1887,14 +2211,15 @@ def get_option_expiries():
 @app.route("/api/options/strikes", methods=["GET"])
 def get_option_strikes():
     global cached_nifty_options
-    expiry = request.args.get("expiry")
-    if not expiry:
+    expiry_param = request.args.get("expiry")
+    if not expiry_param:
         return jsonify({"success": False, "error": "Expiry parameter is required"}), 400
     if cached_nifty_options is None:
         return jsonify({"success": False, "error": "Options data is not cached yet"}), 400
 
     try:
-        filtered = [x for x in cached_nifty_options if x.get('pExpiryDate') == expiry]
+        resolved_exp = resolve_dynamic_expiry(expiry_param)
+        filtered = [x for x in cached_nifty_options if x.get('pExpiryDate') == resolved_exp]
         strikes_set = set(int(float(x.get('dStrikePrice;')) / 100) for x in filtered if x.get('dStrikePrice;') is not None)
         sorted_strikes = sorted(list(strikes_set))
         return jsonify({"success": True, "strikes": sorted_strikes})
