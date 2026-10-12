@@ -902,20 +902,23 @@ def run_strategy_scheduler():
                     except Exception:
                         secs_until_entry = 9999
 
-                    # 1. Warmup Trigger at T - 20s (only during valid market session before entry)
-                    if status == "Deployed" and 0 < secs_until_entry <= 20 and is_market_hours:
+                    is_paper_mode = (strat.get("trade_type") == "Paper")
+                    is_time_valid = is_market_hours or is_paper_mode
+
+                    # 1. Warmup Trigger at T - 20s (allowed anytime for Paper testing, strictly market hours for Real)
+                    if status == "Deployed" and 0 < secs_until_entry <= 20 and is_time_valid:
                         if strat_id not in warmup_stages:
                             warmup_strategy(strat)
 
                     # 2. Trigger Entry at entry_time:
                     # STRICT GUARD:
                     # - Must be Deployed or Warming Up
-                    # - Must be within market hours (09:15 - 15:30)
+                    # - Real trades MUST be within market hours (09:15 - 15:30); Paper trades allowed 24/7 for off-hours testing
                     # - Must NOT be past exit_time
                     # - secs_until_entry must be between -30s and 0s (exact execution window, never firing hours later!)
                     # - Must not have already executed today
                     if status in ["Deployed", "Warming Up"] and strat_id not in active_deployments:
-                        if is_market_hours:
+                        if is_time_valid:
                             is_past_exit = False
                             if exit_time_str:
                                 try:
