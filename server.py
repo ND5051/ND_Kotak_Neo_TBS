@@ -30,19 +30,24 @@ if os.path.exists(sdk_path) and sdk_path not in sys.path:
 
 # Simple dotenv parser
 def load_dotenv():
-    env_path = os.path.join(current_dir, "ND_Kotak_Neo_CodeBase", ".env")
-    if os.path.exists(env_path):
-        with open(env_path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, val = line.split("=", 1)
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'")
-                    if key and val:
-                        os.environ[key] = val
+    # Check both root directory .env and subfolder ND_Kotak_Neo_CodeBase/.env
+    candidate_paths = [
+        os.path.join(current_dir, ".env"),
+        os.path.join(current_dir, "ND_Kotak_Neo_CodeBase", ".env")
+    ]
+    for env_path in candidate_paths:
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, val = line.split("=", 1)
+                        key = key.strip()
+                        val = val.strip().strip('"').strip("'")
+                        if key and val:
+                            os.environ[key] = val
 
 load_dotenv()
 
