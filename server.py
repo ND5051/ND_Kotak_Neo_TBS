@@ -67,6 +67,8 @@ session_info = {
 }
 
 strategies_file = os.path.join(current_dir, "strategies.json")
+state_file = os.path.join(current_dir, "tbs_state.json")
+session_file = os.path.join(current_dir, "tbs_session.json")
 strategies_cache = []
 active_deployments = {}  # strategy_id -> active deployment state data
 warmup_stages = {}  # strategy_id -> staged warmup calculation data
@@ -109,10 +111,14 @@ GSHEET_KEY_FILE = os.path.join(current_dir, "nd-kotakneo-tbs-trading-bot-googles
 GSHEET_ID = "1j4UjAPgLwgl_N5KtWszKEt0lV-azcUGblFX2wOhAxk8"
 _gsheet_client = None
 _gsheet_lock = threading.Lock()
+# Master toggle switch: can be set via ENABLE_GSHEET_LOGGING in .env or dynamically via UI/API
+enable_gsheet_logging = os.environ.get("ENABLE_GSHEET_LOGGING", "true").lower() in ["true", "1", "yes"]
 
 def get_gsheet_spreadsheet():
     """Lazily authenticates and returns the Google Spreadsheet instance."""
     global _gsheet_client
+    if not enable_gsheet_logging:
+        return None
     if not os.path.exists(GSHEET_KEY_FILE):
         return None
     try:
@@ -135,6 +141,9 @@ def async_log_order_to_gsheet(order_data):
     Appends an executed order row to 'Real_Order_Log' or 'Paper_Order_Log' based on trade mode.
     Columns: Date | Time (IST) | Strategy Name | Trade Mode | Leg | Symbol | Order Type | Quantity | Price (Rs) | Order Status | Order ID
     """
+    if not enable_gsheet_logging:
+        return
+
     def _worker():
         with _gsheet_lock:
             try:
@@ -145,10 +154,30 @@ def async_log_order_to_gsheet(order_data):
                 tab_name = "Real_Order_Log" if mode == "Real" else "Paper_Order_Log"
                 ws = sh.worksheet(tab_name)
                 
-                # Format time & date
+                # Only log executed orders to Google Sheet (ignore pending/cancelled)
+                status_str = str(order_data.get("status", ""))
+                if "pending" in status_str.lower() or "cancel" in status_str.lower():
+                    return
+
+                # Format time & date (preserve execution timestamp if provided in order_data)
+                time_val = order_data.get("time")
                 now_ist = get_now_ist()
                 date_str = now_ist.strftime("%Y-%m-%d")
                 time_str = now_ist.strftime("%H:%M:%S")
+
+                if time_val:
+                    try:
+                        # Handles 'YYYY-MM-DD HH:MM:SS' or ISO format
+                        if " " in str(time_val):
+                            parts = str(time_val).split(" ")
+                            date_str = parts[0]
+                            time_str = parts[1].split(".")[0]
+                        elif "T" in str(time_val):
+                            parts = str(time_val).split("T")
+                            date_str = parts[0]
+                            time_str = parts[1].split(".")[0]
+                    except Exception:
+                        pass
                 
                 row = [
                     date_str,
@@ -164,7 +193,7 @@ def async_log_order_to_gsheet(order_data):
                     str(order_data.get("order_id", ""))
                 ]
                 ws.append_row(row)
-                add_app_log(f"📊 Order logged to Google Sheet ({tab_name}): {order_data.get('symbol')} ({order_data.get('type')})")
+                add_app_log(f"📊 Executed order logged to Google Sheet ({tab_name}): {order_data.get('symbol')} ({order_data.get('type')}) @ {order_data.get('price')}")
             except Exception as e:
                 add_app_log(f"Notice: Failed to append order to Google Sheet: {e}")
 
@@ -175,6 +204,9 @@ def async_log_strategy_summary_to_gsheet(strat, deployment, exit_reason="Complet
     Appends a completed strategy summary to 'Real_Strategy_Summary' or 'Paper_Strategy_Summary' based on trade mode.
     Columns: Date | Strategy Name | Trade Mode | Entry Time | Exit Time | Legs Count | Exit Reason | Total Net PnL (Rs) | Legs Breakdown
     """
+    if not enable_gsheet_logging:
+        return
+
     def _worker():
         with _gsheet_lock:
             try:
@@ -244,6 +276,189 @@ def save_strategies_to_disk():
         add_app_log(f"Error saving strategies.json: {e}")
 
 load_strategies_from_disk()
+
+# Persist and restore active trading state across crashes/restarts
+def save_tbs_state_to_disk():
+    """
+    Saves current live deployment state, open positions, and orders log to disk.
+    Called immediately upon order fills, leg square-offs, and state updates.
+    """
+    try:
+        state_data = {
+            "date": get_now_ist().strftime("%Y-%m-%d"),
+            "active_deployments": active_deployments,
+            "positions": positions,
+            "orders_log": orders_log
+        }
+        with open(state_file, "w") as f:
+            json.dump(state_data, f, indent=2)
+    except Exception as e:
+        add_app_log(f"Notice: Error saving tbs_state.json: {e}")
+
+def load_tbs_state_from_disk():
+    """
+    Loads saved deployment state from disk on startup if it belongs to today.
+    """
+    global active_deployments, positions, orders_log
+    if not os.path.exists(state_file):
+        return
+    try:
+        with open(state_file, "r") as f:
+            data = json.load(f)
+        today_str = get_now_ist().strftime("%Y-%m-%d")
+        if data.get("date") == today_str:
+            active_deployments = data.get("active_deployments", {})
+            positions = data.get("positions", [])
+            orders_log = data.get("orders_log", [])
+            add_app_log(f"📥 Restored state from disk: {len(active_deployments)} active deployment(s), {len(positions)} position record(s).")
+        else:
+            add_app_log(f"Notice: Previous state file belongs to date {data.get('date')}, starting fresh for today {today_str}.")
+    except Exception as e:
+        add_app_log(f"Error loading tbs_state.json: {e}")
+
+def save_session_tokens_to_disk(client, ucc, client_name, token=None, sid=None):
+    """
+    Persists authenticated broker session tokens to disk so restarts can resume without manual re-login.
+    """
+    try:
+        tok = token or getattr(client, "bearer_token", None) or getattr(client, "token", None)
+        s_id = sid or getattr(client, "edit_sid", None) or getattr(client, "sid", None)
+        session_data = {
+            "date": get_now_ist().strftime("%Y-%m-%d"),
+            "login_time": get_now_ist().strftime("%H:%M:%S"),
+            "ucc": ucc,
+            "client_name": client_name,
+            "token": tok,
+            "sid": s_id
+        }
+        with open(session_file, "w") as f:
+            json.dump(session_data, f, indent=2)
+    except Exception as e:
+        add_app_log(f"Notice: Could not cache session tokens: {e}")
+
+def try_restore_broker_session():
+    """
+    Attempts to restore broker session on restart using cached tokens or environment credentials.
+    """
+    global client_instance, session_info
+    if client_instance is not None:
+        return True
+    
+    # Check if cached session from today exists
+    today_str = get_now_ist().strftime("%Y-%m-%d")
+    cached = None
+    if os.path.exists(session_file):
+        try:
+            with open(session_file, "r") as f:
+                cached = json.load(f)
+        except Exception:
+            cached = None
+
+    consumer_key = os.environ.get("NEO_CONSUMER_KEY")
+    ucc = (cached and cached.get("ucc")) or os.environ.get("NEO_UCC")
+    
+    if cached and cached.get("date") == today_str and cached.get("token") and consumer_key:
+        try:
+            from neo_api_client import NeoAPI
+            client = NeoAPI(consumer_key=consumer_key, environment="prod", timeout=45)
+            # Rehydrate tokens into client
+            token = cached.get("token")
+            sid = cached.get("sid")
+            client.bearer_token = token
+            client.token = token
+            if sid:
+                client.edit_sid = sid
+                client.sid = sid
+            
+            # Validate session with a quick positions or limits check
+            test_res = client.positions()
+            if isinstance(test_res, dict) and "error" in test_res and test_res.get("error"):
+                add_app_log("Notice: Cached broker session token is invalid or expired.")
+            else:
+                client_instance = client
+                session_info["is_authenticated"] = True
+                session_info["login_date"] = today_str
+                session_info["login_time"] = cached.get("login_time", get_now_ist().strftime("%H:%M:%S"))
+                session_info["client_name"] = cached.get("client_name", "User")
+                session_info["ucc"] = ucc
+                add_app_log(f"✓ Restored authenticated Kotak Neo session for UCC: {ucc}")
+                
+                # Preload master scrips & connect websocket
+                t = threading.Thread(target=preload_scrip_masters, args=(client,), daemon=True)
+                t.start()
+                start_websocket_thread()
+                return True
+        except Exception as e:
+            add_app_log(f"Notice: Auto-session restore notice: {e}")
+            
+    return False
+
+def reconcile_and_recover_deployments():
+    """
+    Called after login or restart to reconcile active deployments against live broker positions.
+    Re-registers WebSocket subscriptions for all active legs.
+    """
+    global active_deployments, strategies_cache, subscription_queue
+    from neo_api_client.websocket.feed import WsToken
+
+    if not active_deployments:
+        return
+
+    add_app_log(f"🔄 Reconciling {len(active_deployments)} active deployment(s) with broker state...")
+    save_needed = False
+
+    for strat_id, deploy in list(active_deployments.items()):
+        strat = next((s for s in strategies_cache if s.get("id") == strat_id), None)
+        if not strat:
+            continue
+
+        mode = strat.get("trade_type", "Real")
+        active_legs = 0
+
+        for leg in deploy.get("legs", []):
+            token = leg.get("token")
+            symbol = leg.get("symbol")
+            if not token or not symbol:
+                continue
+
+            # 1. Ensure token is queued for WebSocket streaming
+            subscription_queue.append(WsToken("nse_fo", str(token)))
+
+            if leg.get("status") == "Active":
+                active_legs += 1
+                if mode == "Real" and client_instance is not None:
+                    # Check if broker SL order completed while offline
+                    if leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+                        sl_det = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
+                        if sl_det and sl_det.get("status") == "complete":
+                            fill_p = sl_det.get("avg_price") or leg.get("sl_price")
+                            add_app_log(f"🔔 Recovery: Found broker SL order {leg['sl_order_id']} for {symbol} was FILLED while offline at ₹{fill_p:.2f}!")
+                            square_off_leg(strat, leg, fill_p, "SL Hit")
+                            save_needed = True
+                            continue
+
+                    # Check net broker position
+                    b_net = get_broker_net_position(symbol, token)
+                    if b_net is not None and b_net == 0:
+                        add_app_log(f"🛡️ Recovery: Broker net position for {symbol} is 0. Marking as squared off.")
+                        leg["status"] = "Completed (Reconciled Flat)"
+                        for pos in positions:
+                            if pos.get("strategy_id") == strat_id and pos.get("symbol") == symbol:
+                                pos["qty"] = 0
+                        save_needed = True
+
+        if active_legs == 0:
+            strat["status"] = "Completed"
+            active_deployments.pop(strat_id, None)
+            save_needed = True
+
+    if save_needed:
+        save_strategies_to_disk()
+        save_tbs_state_to_disk()
+
+# Initial load of strategies and active state on startup
+load_tbs_state_from_disk()
+
 
 # Fetch real-time LTP via quotes REST API
 def fetch_real_time_ltp(exchange, token):
@@ -1354,7 +1569,19 @@ def trigger_strategy_entry(strat):
                     time.sleep(1.0)
                     sl_txn_type = "S" if leg["position"] == "Buy" else "B"
                     formatted_sl_trigger = f"{sl_price:.2f}"
-                    formatted_sl_limit = f"{sl_price:.2f}"
+
+                    # Calculate limit price with slippage protection buffer:
+                    # For Buy SL (short covering), limit must be higher than trigger price
+                    # For Sell SL (long exit), limit must be lower than trigger price
+                    # We use strategy market_protection (default 5%) or minimum 2 rupees
+                    mp_val = float(strat.get("market_protection_value", 5.0))
+                    mp_type = strat.get("market_protection_type", "Percentage")
+                    sl_limit_calc = apply_market_protection(sl_price, sl_txn_type, mp_val, mp_type)
+                    sl_limit_calc = round(round(sl_limit_calc / 0.05) * 0.05, 2)
+                    if sl_limit_calc <= 0.05:
+                        sl_limit_calc = 0.05
+                    formatted_sl_limit = f"{sl_limit_calc:.2f}"
+
                     sl_res = client_instance.place_order(
                         exchange_segment="nse_fo",
                         product=strat["product_type"],
@@ -1413,7 +1640,7 @@ def trigger_strategy_entry(strat):
                 "status": sl_status
             }
             orders_log.append(sl_log_entry)
-            async_log_order_to_gsheet(sl_log_entry)
+            # Pending SL orders are tracked in TBS orders_log; only executed orders are logged to Google Sheet
 
         # Calculate and Place Target Order (Limit Order)
         tgt_price = 0.0
@@ -1484,7 +1711,7 @@ def trigger_strategy_entry(strat):
                 "status": tgt_status
             }
             orders_log.append(tgt_log_entry)
-            async_log_order_to_gsheet(tgt_log_entry)
+            # Pending Target orders are tracked in TBS orders_log; only executed orders are logged to Google Sheet
 
         # Record position ONLY after confirmed entry fill
         pos_record = {
@@ -1533,6 +1760,7 @@ def trigger_strategy_entry(strat):
         strat["status"] = "Failed"
         add_app_log(f"✕ Strategy {strat['name']} failed: No legs were filled.")
     save_strategies_to_disk()
+    save_tbs_state_to_disk()
     add_app_log(f"✓ Strategy {strat['name']} is now Active & monitored.")
 
 def cancel_pending_order(mode, order_id, reason):
@@ -1579,15 +1807,31 @@ def modify_pending_sl_order(mode, leg, new_sl_price, reason="SL Hit on Opposite 
 
     if mode == "Real" and not str(sl_order_id).startswith("SIM_") and not str(sl_order_id).startswith("SL_"):
         try:
+            # Apply market protection buffer to limit price on modified SL as well
+            pos_side = leg.get("position", "Sell")
+            sl_txn_type = "S" if pos_side == "Buy" else "B"
+            strat_obj = None
+            for s in strategies_cache:
+                if any(l.get("sl_order_id") == sl_order_id for l in s.get("legs", [])):
+                    strat_obj = s
+                    break
+            mp_val = float(strat_obj.get("market_protection_value", 5.0)) if strat_obj else 5.0
+            mp_type = strat_obj.get("market_protection_type", "Percentage") if strat_obj else "Percentage"
+            sl_limit_calc = apply_market_protection(new_sl_price, sl_txn_type, mp_val, mp_type)
+            sl_limit_calc = round(round(sl_limit_calc / 0.05) * 0.05, 2)
+            if sl_limit_calc <= 0.05:
+                sl_limit_calc = 0.05
+            formatted_mod_limit = f"{sl_limit_calc:.2f}"
+
             mod_res = client_instance.modify_order(
                 order_id=str(sl_order_id),
-                price=formatted_new_sl,
+                price=formatted_mod_limit,
                 trigger_price=formatted_new_sl,
                 order_type="SL",
                 quantity=str(leg.get("qty", 0)),
                 validity="DAY"
             )
-            add_app_log(f"Real SL Order {sl_order_id} modified to ₹{formatted_new_sl} (Broker Response: {mod_res})")
+            add_app_log(f"Real SL Order {sl_order_id} modified to Trigger: ₹{formatted_new_sl}, Limit: ₹{formatted_mod_limit} (Broker Response: {mod_res})")
         except Exception as e:
             add_app_log(f"Error modifying Real SL Order {sl_order_id}: {e}")
             return False
@@ -1697,6 +1941,20 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
                                 cancel_pending_order(mode, leg["tgt_order_id"], "Auto-Cancelled (Position Closed Externally)")
                             leg["status"] = "Completed (External Exit)"
                             leg["exit_price"] = current_price
+                            ext_exit_entry = {
+                                "order_id": "EXTERNAL_EXIT",
+                                "time": get_now_ist().strftime("%Y-%m-%d %H:%M:%S"),
+                                "strategy_name": strat["name"],
+                                "leg_idx": leg["leg_idx"],
+                                "symbol": leg["symbol"],
+                                "type": f"{'Sell' if leg['position'] == 'Buy' else 'Buy'} (External Exit)",
+                                "qty": leg["qty"],
+                                "price": current_price,
+                                "mode": mode,
+                                "status": "Executed (External Exit)"
+                            }
+                            orders_log.append(ext_exit_entry)
+                            async_log_order_to_gsheet(ext_exit_entry)
                             for pos in positions:
                                 if pos["strategy_id"] == strat_id and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
                                     pos["qty"] = 0
@@ -1749,9 +2007,40 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
             
     # If all legs are completed, clean up active deployment
     if active_legs_count == 0 or time_exit:
+        # Ultimate EOD Safety Net (Real Mode):
+        # Verify that NO orphan open positions remain at the broker for this strategy's symbols
+        if mode == "Real" and client_instance is not None:
+            for chk_leg in deploy.get("legs", []):
+                sym = chk_leg.get("symbol")
+                tok = chk_leg.get("token")
+                b_qty = get_broker_net_position(sym, tok)
+                if b_qty is not None and b_qty != 0:
+                    add_app_log(f"🚨 CRITICAL EOD SAFETY ALERT: Discovered lingering open net quantity ({b_qty}) at broker for {sym}! Firing emergency square-off.")
+                    emg_txn_type = "S" if b_qty > 0 else "B"
+                    emg_curr_p = ltp_cache.get(tok, chk_leg.get("entry_price", 10.0))
+                    emg_lim_p = apply_market_protection(emg_curr_p, emg_txn_type, 10.0, "Percentage")
+                    emg_lim_p = round(round(emg_lim_p / 0.05) * 0.05, 2)
+                    if emg_lim_p <= 0.05:
+                        emg_lim_p = 0.05
+                    try:
+                        emg_res = client_instance.place_order(
+                            exchange_segment="nse_fo",
+                            product=strat["product_type"],
+                            price=f"{emg_lim_p:.2f}",
+                            order_type="L",
+                            quantity=str(abs(b_qty)),
+                            validity="DAY",
+                            trading_symbol=sym,
+                            transaction_type=emg_txn_type
+                        )
+                        add_app_log(f"🚨 Emergency Square-off Order Placed for {sym} (Qty: {abs(b_qty)}): {emg_res}")
+                    except Exception as emg_err:
+                        add_app_log(f"🚨 Emergency Square-off Exception for {sym}: {emg_err}")
+
         strat["status"] = "Completed"
         completed_dep = active_deployments.pop(strat_id, None)
         save_strategies_to_disk()
+        save_tbs_state_to_disk()
         add_app_log(f"Strategy {strat['name']} completed execution.")
         
         # Log Completed Strategy Summary to Google Sheets (for both Real & Paper trades)
@@ -1771,10 +2060,10 @@ def square_off_leg(strat, leg, exit_price, reason):
     if reason == "SL Hit":
         if leg.get("tgt_order_id"):
             cancel_pending_order(mode, leg["tgt_order_id"], "OCO - SL Hit")
-        if leg.get("sl_order_id"):
+        if mode == "Paper" and leg.get("sl_order_id"):
             for ord_item in orders_log:
                 if ord_item.get("order_id") == leg["sl_order_id"]:
-                    ord_item["status"] = f"{'Simulated ' if mode=='Paper' else ''}Executed (SL Hit)"
+                    ord_item["status"] = "Simulated Executed (SL Hit)"
                     ord_item["price"] = exit_price
                     ord_item["time"] = exit_ts
     elif reason == "Target Hit":
@@ -1806,14 +2095,12 @@ def square_off_leg(strat, leg, exit_price, reason):
     # Real-mode Pre-Flight Safety Checks with Broker
     need_broker_exit = True
     if mode == "Real":
-        # Check A: If reason is SL Hit and we placed a broker-side SL order, that order closed the position
-        if reason == "SL Hit" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
-            need_broker_exit = False
-            add_app_log(f"Broker-side SL order {leg['sl_order_id']} handled square-off for {leg['symbol']}.")
+        sl_oid = leg.get("sl_order_id")
+        has_broker_sl = sl_oid and not str(sl_oid).startswith("SIM_") and not str(sl_oid).startswith("SL_")
 
-        # Check B: For Time Exit / Manual Stop / Target Hit, check if the SL order was already executed at broker
-        if need_broker_exit and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
-            sl_det = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
+        if has_broker_sl:
+            # Check actual execution status of the broker SL order
+            sl_det = get_order_execution_details(sl_oid, max_retries=1, delay_sec=0)
             if sl_det and sl_det.get("status") == "complete":
                 need_broker_exit = False
                 actual_sl_px = sl_det.get("avg_price") or exit_price
@@ -1821,13 +2108,21 @@ def square_off_leg(strat, leg, exit_price, reason):
                 leg["status"] = "SL Hit"
                 leg["exit_price"] = actual_sl_px
                 reason = "SL Hit"
-                # Update SL order in orders log to complete
                 for ord_item in orders_log:
-                    if ord_item.get("order_id") == leg["sl_order_id"]:
+                    if ord_item.get("order_id") == sl_oid:
                         ord_item["status"] = "Executed (SL Hit)"
                         ord_item["price"] = actual_sl_px
                         ord_item["time"] = exit_ts
-                add_app_log(f"🛡️ Safety Check: Discovered broker SL order {leg['sl_order_id']} for {leg['symbol']} was ALREADY filled at ₹{actual_sl_px:.2f}! Aborting duplicate exit order.")
+                add_app_log(f"🛡️ Confirmed: Broker SL order {sl_oid} for {leg['symbol']} was FILLED at ₹{actual_sl_px:.2f}. No secondary exit needed.")
+            else:
+                # The SL order did NOT execute (it is 'open', 'trigger pending', or 'rejected').
+                # We CANNOT assume the position is closed!
+                # We MUST cancel the resting SL order to avoid a duplicate fill later,
+                # then proceed to place a limit square-off order with market protection.
+                raw_st = sl_det.get("raw_status") if sl_det else "unconfirmed"
+                add_app_log(f"⚠️ Broker SL order {sl_oid} for {leg['symbol']} is not filled (status='{raw_st}'). Cancelling resting SL order and firing active exit order.")
+                cancel_pending_order(mode, sl_oid, f"Cancelled for {reason}")
+                need_broker_exit = True
 
         # Check C: Net broker position reconciliation check before placing ANY market/limit exit order
         if need_broker_exit:
@@ -1919,11 +2214,30 @@ def square_off_leg(strat, leg, exit_price, reason):
         }
         orders_log.append(exit_log_entry)
         async_log_order_to_gsheet(exit_log_entry)
+    else:
+        # Broker-side SL or external exit already filled/closed the position
+        executed_order_id = leg.get("sl_order_id") if reason == "SL Hit" else exit_order_id
+        exit_log_entry = {
+            "order_id": executed_order_id or "EXTERNAL_EXIT",
+            "time": exit_ts,
+            "strategy_name": strat["name"],
+            "leg_idx": leg["leg_idx"],
+            "symbol": leg["symbol"],
+            "type": f"{'Sell' if leg['position'] == 'Buy' else 'Buy'} ({reason})",
+            "qty": leg["qty"],
+            "price": exit_price,
+            "mode": mode,
+            "status": f"Executed ({reason})"
+        }
+        # Avoid duplicate appending if sl_order_id is already in orders_log, but ensure it is logged to Google Sheet
+        async_log_order_to_gsheet(exit_log_entry)
 
     # Zero out position
     for pos in positions:
         if pos["strategy_id"] == strat["id"] and pos["symbol"] == leg["symbol"] and pos["qty"] != 0:
             pos["qty"] = 0
+
+    save_tbs_state_to_disk()
 
     # Enhancement #4: Move Opposite Leg SL to Cost / +1 Point Profit on SL Hit
     if reason == "SL Hit" and strat.get("move_sl_to_cost_on_sl_hit", False):
@@ -2057,12 +2371,20 @@ def login():
                 session_info["client_name"] = client_name_val
                 session_info["ucc"] = ucc
                 
+                # Save session tokens for restart resilience
+                bearer_tok = validate_response.get("data", {}).get("token") or login_response.get("data", {}).get("token")
+                session_sid = validate_response.get("data", {}).get("sid") or login_response.get("data", {}).get("sid")
+                save_session_tokens_to_disk(client, ucc, client_name_val, token=bearer_tok, sid=session_sid)
+
                 # Start preloading master scrips in background
                 t = threading.Thread(target=preload_scrip_masters, args=(client,), daemon=True)
                 t.start()
                 
                 # Start websocket client
                 start_websocket_thread()
+
+                # Reconcile any existing deployments with broker
+                threading.Thread(target=reconcile_and_recover_deployments, daemon=True).start()
                 
                 return jsonify({
                     "success": True,
@@ -2377,6 +2699,7 @@ def stop_strategy(strat_id):
         active_deployments.pop(strat_id, None)
         
     save_strategies_to_disk()
+    save_tbs_state_to_disk()
     add_app_log(f"Stopped execution for strategy: {strat['name']}.")
     return jsonify({"success": True})
 
@@ -2457,10 +2780,39 @@ def get_dashboard_updates():
         "positions": positions,
         "planned_positions": planned_positions,
         "orders": orders_log,
-        "logs": logs_slice
+        "logs": logs_slice,
+        "gsheet_logging": enable_gsheet_logging
+    })
+
+@app.route("/api/settings/gsheet-logging", methods=["POST"])
+def toggle_gsheet_logging():
+    global enable_gsheet_logging
+    data = request.get_json(silent=True) or {}
+    if "enabled" in data:
+        enable_gsheet_logging = bool(data["enabled"])
+    else:
+        enable_gsheet_logging = not enable_gsheet_logging
+    
+    status_str = "ENABLED" if enable_gsheet_logging else "DISABLED"
+    add_app_log(f"⚙️ Google Sheet Trade Logging has been {status_str}.")
+    return jsonify({
+        "success": True,
+        "gsheet_logging": enable_gsheet_logging,
+        "message": f"Google Sheet Trade Logging is now {status_str}."
     })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
     print(f"\n🚀 Server starting on http://127.0.0.1:{port}\n")
+    
+    # On server boot/restart: Attempt to restore broker session & reconcile existing deployments
+    try:
+        session_restored = try_restore_broker_session()
+        if session_restored:
+            reconcile_and_recover_deployments()
+        elif active_deployments:
+            add_app_log("⚠️ Active deployments loaded from disk. Please log in to complete broker reconciliation and resume streaming.")
+    except Exception as e:
+        add_app_log(f"Notice: Startup recovery check exception: {e}")
+
     app.run(host="0.0.0.0", port=port, debug=True, use_reloader=False)

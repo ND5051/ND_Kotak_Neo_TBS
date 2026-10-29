@@ -571,6 +571,12 @@
         </div>
 
         <div class="header-meta" style="display: flex; align-items: center; gap: 15px;">
+            <!-- Google Sheet Logging Switch -->
+            <button id="gsheet-toggle-btn" onclick="toggleGSheetLogging()" title="Click to Toggle Google Sheets Trade Logging" style="display: flex; align-items: center; gap: 7px; background: #f8fafc; border: 1px solid var(--border-color); padding: 5px 12px; border-radius: 20px; font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: all 0.2s;">
+                <span id="gsheet-status-dot" style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 5px #10b981;"></span>
+                <span id="gsheet-btn-label" style="color: var(--text-main);">GSheet Logging: ON</span>
+            </button>
+
             <!-- Active User Session Pill (Shown only when logged in) -->
             <div id="header-user-pill" style="display: none; align-items: center; gap: 10px; background: #ecfdf5; border: 1px solid #a7f3d0; padding: 4px 12px; border-radius: 20px; font-size: 0.75rem;">
                 <span style="display: inline-block; width: 7px; height: 7px; background: #10b981; border-radius: 50%; box-shadow: 0 0 6px #10b981;"></span>
@@ -1256,6 +1262,11 @@
                     isConnected = false;
                 }
 
+                // Update Google Sheet logging button state
+                if (data.gsheet_logging !== undefined) {
+                    updateGSheetToggleUI(data.gsheet_logging);
+                }
+
                 // 2. Render logs
                 const logsBody = document.getElementById('logs-container-body');
                 const lastScrollTop = logsBody.scrollTop;
@@ -1439,6 +1450,48 @@
 
         // Helper Strategy Lookup cache
         let localStrats = [];
+        let currentGSheetLogging = true;
+
+        function updateGSheetToggleUI(enabled) {
+            currentGSheetLogging = enabled;
+            const btn = document.getElementById('gsheet-toggle-btn');
+            const dot = document.getElementById('gsheet-status-dot');
+            const label = document.getElementById('gsheet-btn-label');
+            if (!btn || !dot || !label) return;
+
+            if (enabled) {
+                dot.style.background = '#10b981';
+                dot.style.boxShadow = '0 0 5px #10b981';
+                label.textContent = 'GSheet Logging: ON';
+                label.style.color = '#065f46';
+                btn.style.background = '#ecfdf5';
+                btn.style.borderColor = '#a7f3d0';
+            } else {
+                dot.style.background = '#94a3b8';
+                dot.style.boxShadow = 'none';
+                label.textContent = 'GSheet Logging: OFF';
+                label.style.color = '#64748b';
+                btn.style.background = '#f1f5f9';
+                btn.style.borderColor = '#cbd5e1';
+            }
+        }
+
+        async function toggleGSheetLogging() {
+            try {
+                const res = await fetch('/api/settings/gsheet-logging', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled: !currentGSheetLogging })
+                });
+                const data = await res.json();
+                if (data.success) {
+                    updateGSheetToggleUI(data.gsheet_logging);
+                    showToast(data.message, data.gsheet_logging ? 'success' : 'info');
+                }
+            } catch (err) {
+                showToast("Failed to toggle Google Sheets logging: " + err.message, "error");
+            }
+        }
 
         function getStrategyNameById(id) {
             const s = localStrats.find(x => x.id === id);

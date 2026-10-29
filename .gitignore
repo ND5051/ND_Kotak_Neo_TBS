@@ -90,6 +90,8 @@ logs/
 
 # Local strategy state
 strategies.json
+tbs_state.json
+tbs_session.json
 
 # Local enhancement and architecture tracking
 future_enhancement_ideas.md
