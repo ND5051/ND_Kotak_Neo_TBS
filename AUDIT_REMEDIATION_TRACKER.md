@@ -43,11 +43,11 @@
 
 | ID | Item | Auditor Recommendation | ND & Assistant Analysis | Current Status | Implementation Target |
 |:---|:---|:---|:---|:---:|:---|
-| **P2-1** | **Daily Loss Kill Switch** | Stop new entries if realized account loss crosses rupee threshold. | **Agree**. Standard capital preservation rule. | ⚪ **Future Phase** | Phase 3 |
-| **P2-2** | **Portfolio Drawdown Limit** | Force flat if peak-to-trough drawdown limit breached. | **Agree**. Institutional-grade safety net. | ⚪ **Future Phase** | Phase 3 |
-| **P2-3** | **Max Exposure Controls** | Hard cap on total lots, margin utilized, and short premium. | **Agree**. Prevents strategy configuration errors from over-leveraging. | ⚪ **Future Phase** | Phase 3 |
-| **P2-4** | **Max Concurrent Strategies** | Cap on number of actively trading strategies. | **Agree**. Useful protection against accidental multi-deployments. | ⚪ **Future Phase** | Phase 3 |
-| **P2-5** | **Portfolio Health Dashboard** | Realized/Unrealized PnL, margin utilization UI cards. | **Agree**. Great operational visibility. | ⚪ **Future Phase** | Phase 3 |
+| **P2-1** | **Daily Loss Kill Switch** | Stop new entries if realized account loss crosses rupee threshold. | **Agree**. Halts new strategy entries when total closed loss breaches `MAX_DAILY_LOSS_RUPEES` (default ₹5,000, configurable in `.env`). | ✅ **Completed** | Implemented `check_portfolio_risk_guards()` & Kill Switch state machine |
+| **P2-2** | **Portfolio Drawdown Limit** | Force flat if peak-to-trough drawdown limit breached. | **Agree**. Covered alongside P2-1 portfolio loss evaluation. | ⚪ **Future Phase** | Phase 3 |
+| **P2-3** | **Max Exposure Controls** | Hard cap on total lots, margin utilized, and short premium. | **Agree**. Margin check tied to pre-flight warmup. | ⚪ **Future Phase** | Phase 3 |
+| **P2-4** | **Max Concurrent Strategies** | Cap on number of actively trading strategies. | **Agree**. Protects against accidental multi-deployments via `MAX_ACTIVE_STRATEGIES` cap (default 3, configurable in `.env`). | ✅ **Completed** | Implemented active deployment concurrency check before entry |
+| **P2-5** | **Portfolio Health Dashboard** | Realized/Unrealized PnL, margin utilization UI cards. | **Agree**. Emits `risk_status` payload on `/api/dashboard-updates` stream. | ✅ **Completed** | Implemented live risk status stream payload |
 
 ---
 

@@ -85,6 +85,70 @@ planned_positions = []  # List of staged positions during warmup
 orders_log = []
 positions = []
 
+# =====================================================================
+# P2 RISK MANAGEMENT CONTROLS & THRESHOLDS
+# =====================================================================
+# User-configurable via .env or API endpoints
+MAX_DAILY_LOSS_RUPEES = float(os.environ.get("MAX_DAILY_LOSS_RUPEES", 5000.0))  # 0 or negative disables
+MAX_ACTIVE_STRATEGIES = int(os.environ.get("MAX_ACTIVE_STRATEGIES", 3))         # Max concurrent active strats
+kill_switch_triggered = False
+kill_switch_reason = ""
+risk_lock = threading.Lock()
+
+def calculate_daily_realized_pnl():
+    """
+    Computes total realized PnL across all closed positions today.
+    """
+    total_realized = 0.0
+    with position_lock:
+        for pos in positions:
+            if pos.get("qty") == 0:
+                total_realized += float(pos.get("pnl", 0.0))
+    return round(total_realized, 2)
+
+def check_portfolio_risk_guards(strat=None):
+    """
+    Evaluates account-level portfolio risk rules:
+    1. P2-1: Daily Loss Kill Switch.
+    2. P2-4: Max Concurrent Active Strategies cap.
+    
+    Returns:
+        (bool, str): (allowed, rejection_reason)
+    """
+    global kill_switch_triggered, kill_switch_reason
+    with risk_lock:
+        # Check 1: Has Kill Switch already been triggered today?
+        if kill_switch_triggered:
+            return False, f"Trading halted by Kill Switch: {kill_switch_reason}"
+
+        # Check 2: Has Daily Max Realized Loss threshold been breached?
+        if MAX_DAILY_LOSS_RUPEES > 0:
+            daily_realized = calculate_daily_realized_pnl()
+            if daily_realized <= -MAX_DAILY_LOSS_RUPEES:
+                kill_switch_triggered = True
+                kill_switch_reason = f"Daily Realized Loss (-₹{abs(daily_realized):.2f}) breached max limit (-₹{MAX_DAILY_LOSS_RUPEES:.2f})"
+                add_app_log(
+                    f"🛑 PORTFOLIO RISK TRIGGER: {kill_switch_reason}. Blocking all future entries today!",
+                    event_type="RISK_KILL_SWITCH_TRIGGERED",
+                    event_data={"realized_pnl": daily_realized, "limit": MAX_DAILY_LOSS_RUPEES}
+                )
+                return False, kill_switch_reason
+
+        # Check 3: Max Concurrent Active Strategies cap (P2-4)
+        if strat is not None and MAX_ACTIVE_STRATEGIES > 0:
+            with deployment_lock:
+                current_active_count = len(active_deployments)
+            if current_active_count >= MAX_ACTIVE_STRATEGIES:
+                msg = f"Max concurrent active strategies ({MAX_ACTIVE_STRATEGIES}) reached (Current: {current_active_count})"
+                add_app_log(
+                    f"⚠️ RISK GUARD: Entry blocked for '{strat.get('name')}': {msg}",
+                    event_type="RISK_MAX_STRATEGIES_BLOCKED",
+                    event_data={"active_count": current_active_count, "limit": MAX_ACTIVE_STRATEGIES}
+                )
+                return False, msg
+
+    return True, ""
+
 # Concurrency locks protecting shared collections across threads
 strategy_lock = threading.Lock()
 deployment_lock = threading.Lock()
@@ -1378,8 +1442,16 @@ def run_strategy_scheduler():
                             if not is_past_exit and not already_ran_today:
                                 # Trigger within 30 seconds of entry_time
                                 if -30 <= secs_until_entry <= 0:
-                                    strat["last_run_date"] = today_date_str
-                                    trigger_strategy_entry(strat)
+                                    # P2 Portfolio Risk Guard pre-flight check
+                                    allowed, reject_reason = check_portfolio_risk_guards(strat)
+                                    if not allowed:
+                                        strat["last_run_date"] = today_date_str
+                                        strat["status"] = "Risk Halted"
+                                        save_strategies_to_disk()
+                                        add_app_log(f"⛔ Strategy '{strat['name']}' entry aborted: {reject_reason}")
+                                    else:
+                                        strat["last_run_date"] = today_date_str
+                                        trigger_strategy_entry(strat)
 
                     # 3. Check Active Deployed state (SL / Target / Exit Time)
                     if is_already_active:
@@ -3086,6 +3158,17 @@ def get_dashboard_updates():
     client_name = session_info.get("client_name") or ("Neo Client" if client_instance is not None else "-")
     ucc = session_info.get("ucc") or os.environ.get("NEO_UCC", "-")
 
+    # Compute P2 portfolio risk status
+    daily_realized_pnl = calculate_daily_realized_pnl()
+    with risk_lock:
+        risk_payload = {
+            "max_daily_loss": MAX_DAILY_LOSS_RUPEES,
+            "daily_realized_pnl": daily_realized_pnl,
+            "max_active_strategies": MAX_ACTIVE_STRATEGIES,
+            "kill_switch_triggered": kill_switch_triggered,
+            "kill_switch_reason": kill_switch_reason
+        }
+
     return jsonify({
         "success": True,
         "session": {
@@ -3104,7 +3187,8 @@ def get_dashboard_updates():
         "planned_positions": planned_snapshot,
         "orders": orders_slice,
         "logs": logs_slice,
-        "gsheet_logging": enable_gsheet_logging
+        "gsheet_logging": enable_gsheet_logging,
+        "risk_status": risk_payload
     })
 
 @app.route("/api/settings/gsheet-logging", methods=["POST"])
