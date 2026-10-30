@@ -2220,7 +2220,30 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
 
         # Broker Reconciliation Check (Real Mode):
         # 1. Check if broker-side SL order has already filled on the exchange
-        if mode == "Real" and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
+        # ADAPTIVE ON-DEMAND POLLING:
+        # Instead of hammering order_report() every second all day, only poll broker SL status if:
+        # a) Current WebSocket LTP is within danger distance (<= 2.0 pts) of configured SL trigger price, OR
+        # b) Strategy software SL has already triggered (pnl <= -sl_val), OR
+        # c) Strategy has reached Exit Time (15:15 IST)
+        sl_trig_px = float(leg.get("sl_price") or 0.0)
+        pos_side = leg.get("position", "Sell")
+        
+        # Calculate distance to SL:
+        # For Sell leg: SL triggers when price rises up to sl_trig_px -> distance = sl_trig_px - current_price
+        # For Buy leg: SL triggers when price falls down to sl_trig_px -> distance = current_price - sl_trig_px
+        if sl_trig_px > 0:
+            distance_to_sl = (sl_trig_px - current_price) if pos_side == "Sell" else (current_price - sl_trig_px)
+        else:
+            distance_to_sl = 999.0
+
+        should_check_broker_sl = (
+            time_exit or 
+            distance_to_sl <= 2.0 or 
+            (sl_type == "Points" and pnl <= -sl_val) or
+            (sl_type in ["Percentage", "Percent"] and (pnl / entry_price) * 100 <= -sl_val)
+        )
+
+        if mode == "Real" and should_check_broker_sl and leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
             sl_det = get_order_execution_details(leg["sl_order_id"], max_retries=1, delay_sec=0)
             if sl_det and sl_det.get("status") == "complete":
                 sl_hit = True
@@ -2228,21 +2251,21 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
                 add_app_log(f"🔔 Exchange Fill Detected: Broker SL order {leg['sl_order_id']} for {leg['symbol']} was FILLED at ₹{sl_fill_price:.2f}.")
 
         # 2. Check if position was closed externally (User manual square-off on phone/web or RMS)
-        # CRITICAL GUARDS:
-        # a) Grace period: Never auto-exit within the first 120 seconds of entry to give broker position caches time to settle
-        # b) Debounce: Require 30 consecutive 1-second cycles (30s) of confirmed 0-qty before reconciling
-        # c) Order verification: Confirm our SL order was NOT filled before assuming external closure
+        # ADAPTIVE INTERVAL: Check every 30 seconds (or immediately at time_exit) instead of every 1 second
         now_epoch = time.time()
         entry_epoch = leg.get("entry_time_epoch") or deploy.get("entry_time_epoch") or now_epoch
         seconds_since_entry = now_epoch - entry_epoch
+        last_pos_check = leg.get("_last_pos_check_epoch", 0.0)
+        should_check_external_pos = (time_exit or (now_epoch - last_pos_check >= 30.0))
 
-        if mode == "Real" and not sl_hit:
+        if mode == "Real" and not sl_hit and should_check_external_pos:
+            leg["_last_pos_check_epoch"] = now_epoch
             if seconds_since_entry > 120: # 2-minute post-entry settlement grace period
                 broker_net = get_broker_net_position(leg["symbol"], leg.get("token"))
                 if broker_net is not None and broker_net == 0:
                     zero_count = leg.get("_zero_pos_count", 0) + 1
                     leg["_zero_pos_count"] = zero_count
-                    if zero_count >= 30: # 30 consecutive seconds of confirmed 0 position
+                    if zero_count >= 2: # Confirmed 0 position across 2 consecutive checks (60s)
                         # Verify SL order didn't complete right before this
                         sl_filled = False
                         if leg.get("sl_order_id") and not str(leg.get("sl_order_id")).startswith("SL_"):
@@ -2254,7 +2277,7 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
                                 add_app_log(f"🔔 Exchange Fill Detected on SL Check: SL order {leg['sl_order_id']} for {leg['symbol']} was FILLED at ₹{sl_fill_price:.2f}.")
 
                         if not sl_filled:
-                            add_app_log(f"⚠️ External Square-off Confirmed: Broker net open position for {leg['symbol']} confirmed 0 across 30 consecutive checks. Reconciling TBS state.")
+                            add_app_log(f"⚠️ External Square-off Confirmed: Broker net open position for {leg['symbol']} confirmed 0 across consecutive checks. Reconciling TBS state.")
                             # Auto-cancel any remaining pending orders for this leg so they don't fire later
                             if leg.get("sl_order_id"):
                                 cancel_pending_order(mode, leg["sl_order_id"], "Auto-Cancelled (Position Closed Externally)")
