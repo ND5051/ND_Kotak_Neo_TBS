@@ -144,6 +144,45 @@ def atomic_json_dump(filepath, data, indent=2):
         raise e
 
 # =====================================================================
+# CENTRALIZED PERSISTENCE QUEUE WORKER (P1-2)
+# Offloads disk I/O from the 1s trading tick loop to an asynchronous worker
+# =====================================================================
+_persistence_queue = queue.Queue(maxsize=1000)
+
+def _persistence_worker_loop():
+    """Background worker that executes serialized disk writes from the persistence queue."""
+    while True:
+        try:
+            task = _persistence_queue.get()
+            if task is None:
+                break
+            
+            filepath = task.get("filepath")
+            data = task.get("data")
+            indent = task.get("indent", 2)
+            
+            if filepath and data is not None:
+                atomic_json_dump(filepath, data, indent=indent)
+        except Exception as e:
+            add_app_log(f"Notice: Persistence queue write error for {filepath}: {e}")
+        finally:
+            _persistence_queue.task_done()
+
+threading.Thread(target=_persistence_worker_loop, daemon=True, name="PersistenceWorker").start()
+
+def enqueue_atomic_write(filepath, data, indent=2):
+    """Enqueues an atomic file write task to the background persistence worker."""
+    try:
+        _persistence_queue.put_nowait({
+            "filepath": filepath,
+            "data": data,
+            "indent": indent
+        })
+    except queue.Full:
+        # Fallback to direct synchronous write if queue fills up
+        atomic_json_dump(filepath, data, indent=indent)
+
+# =====================================================================
 # GOOGLE SHEETS ASYNC LOGGING ENGINE (P1-3)
 # Dedicated single-worker queue to eliminate thread explosion & timeouts
 # =====================================================================
@@ -354,7 +393,7 @@ def save_strategies_to_disk():
     try:
         with strategy_lock:
             data = list(strategies_cache)
-        atomic_json_dump(strategies_file, data, indent=2)
+        enqueue_atomic_write(strategies_file, data, indent=2)
     except Exception as e:
         add_app_log(f"Error saving strategies.json: {e}")
 
@@ -363,7 +402,7 @@ load_strategies_from_disk()
 # Persist and restore active trading state across crashes/restarts
 def save_tbs_state_to_disk():
     """
-    Saves current live deployment state, open positions, and orders log to disk atomically.
+    Saves current live deployment state, open positions, and orders log to disk asynchronously.
     Called immediately upon order fills, leg square-offs, and state updates.
     """
     try:
@@ -374,7 +413,7 @@ def save_tbs_state_to_disk():
                 "positions": list(positions),
                 "orders_log": list(orders_log)
             }
-        atomic_json_dump(state_file, state_data, indent=2)
+        enqueue_atomic_write(state_file, state_data, indent=2)
     except Exception as e:
         add_app_log(f"Notice: Error saving tbs_state.json: {e}")
 
