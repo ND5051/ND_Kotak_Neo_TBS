@@ -549,15 +549,75 @@ def reconcile_and_recover_deployments():
 load_tbs_state_from_disk()
 
 
+# =====================================================================
+# RESILIENT BROKER API EXECUTION WITH EXPONENTIAL BACKOFF (P1-5)
+# Protects against HTTP 429 rate limits, connection drops, and gateway timeouts
+# =====================================================================
+def safe_broker_api_call(call_name, func, *args, max_retries=3, initial_delay=0.5, **kwargs):
+    """
+    Executes a Kotak Neo API SDK function with automatic retry and exponential backoff
+    when encountering rate limits (HTTP 429), timeouts, or transient network hiccups.
+    
+    Args:
+        call_name (str): Human-readable name for logging (e.g. 'quotes', 'positions')
+        func (callable): The SDK method to call (e.g. client_instance.positions)
+        max_retries (int): Number of retry attempts before giving up
+        initial_delay (float): Starting delay in seconds (doubles on each retry)
+    """
+    delay = initial_delay
+    last_exception = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            res = func(*args, **kwargs)
+            # Check for error responses embedded in dict
+            if isinstance(res, dict):
+                err_code = str(res.get("stCode") or res.get("stat") or "")
+                err_msg = str(res.get("errMsg") or res.get("message") or "")
+                
+                # Check for 429 / Rate Limit in response payload
+                if "429" in err_code or "rate limit" in err_msg.lower() or "too many requests" in err_msg.lower():
+                    if attempt < max_retries:
+                        add_app_log(f"⚠️ Broker API Rate Limit (429) on {call_name}. Backing off {delay:.1f}s (Attempt {attempt}/{max_retries})...")
+                        time.sleep(delay)
+                        delay *= 2.0
+                        continue
+            return res
+
+        except Exception as e:
+            last_exception = e
+            err_str = str(e).lower()
+            is_transient = any(k in err_str for k in [
+                "timeout", "timed out", "connection", "terminated", "reset", "broken pipe", 
+                "429", "too many requests", "gateway", "502", "503", "504"
+            ])
+            
+            if is_transient and attempt < max_retries:
+                add_app_log(f"⚠️ Broker API transient error on {call_name}: {e}. Retrying in {delay:.1f}s (Attempt {attempt}/{max_retries})...")
+                time.sleep(delay)
+                delay *= 2.0
+            else:
+                if attempt == max_retries and is_transient:
+                    add_app_log(f"❌ Broker API call {call_name} failed after {max_retries} attempts: {e}")
+                raise e
+
+    if last_exception:
+        raise last_exception
+    return None
+
 # Fetch real-time LTP via quotes REST API
 def fetch_real_time_ltp(exchange, token):
     global client_instance
     if client_instance is None:
         return None
     try:
-        response = client_instance.quotes(
+        response = safe_broker_api_call(
+            "quotes",
+            client_instance.quotes,
             instrument_tokens=[{"instrument_token": str(token), "exchange_segment": exchange}], 
-            quote_type="ltp"
+            quote_type="ltp",
+            max_retries=2,
+            initial_delay=0.3
         )
         items = []
         if isinstance(response, list):
@@ -673,7 +733,14 @@ def find_closest_premium_scrip(candidates, target_prem, atm_strike, option_type)
     # 1. Fetch live batch quotes from broker
     if client_instance:
         try:
-            quotes_res = client_instance.quotes(instrument_tokens=tokens_req, quote_type="ltp")
+            quotes_res = safe_broker_api_call(
+                "batch_quotes",
+                client_instance.quotes,
+                instrument_tokens=tokens_req,
+                quote_type="ltp",
+                max_retries=2,
+                initial_delay=0.4
+            )
             items = []
             if isinstance(quotes_res, list):
                 items = quotes_res
@@ -909,7 +976,12 @@ def get_broker_net_position(trading_symbol, instrument_token=None):
     if client_instance is None or not trading_symbol:
         return None
     try:
-        pos_res = client_instance.positions()
+        pos_res = safe_broker_api_call(
+            "positions",
+            client_instance.positions,
+            max_retries=2,
+            initial_delay=0.5
+        )
         if not pos_res or (isinstance(pos_res, dict) and ("Error" in pos_res or "error" in pos_res or "Error Message" in pos_res)):
             return None
 

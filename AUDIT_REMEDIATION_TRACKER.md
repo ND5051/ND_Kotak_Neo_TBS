@@ -35,7 +35,7 @@
 | **P1-2** | **Centralized Persistence Queue** | Background worker thread using `queue.Queue` for saving files. | **Agree**. Decouples disk I/O from 1s trading tick loop. Will implement alongside Phase 2. | ⚪ **Future Phase** | Phase 2 |
 | **P1-3** | **Dedicated Google Sheets Queue** | Replace thread-per-write with single persistent FIFO worker queue. | **Strongly Agree**. Spawning threads per log can exhaust resources or hang on Google API timeouts. Single worker queue is clean & resilient. | ✅ **Completed** | Implemented `_gsheet_queue` & `_gsheet_worker_loop` daemon |
 | **P1-4** | **Structured Logging** | Transition to structured JSON logs. | **Agree**. Great for post-trade quant audits, but must preserve existing UI live log feed. | ⚪ **Future Phase** | Phase 2 |
-| **P1-5** | **Rate Limit & Backoff Handler** | Add centralized exponential backoff for HTTP 429 and timeouts. | **Strongly Agree**. Prevents cascading network disconnects during broker API outages. | ⚪ **Future Phase** | Phase 2 |
+| **P1-5** | **Rate Limit & Backoff Handler** | Add centralized exponential backoff for HTTP 429 and timeouts. | **Strongly Agree**. Prevents cascading network disconnects during broker API outages. | ✅ **Completed** | Implemented `safe_broker_api_call()` with progressive retry backoff |
 
 ---
 
