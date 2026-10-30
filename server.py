@@ -97,10 +97,17 @@ ws_thread = None
 subscription_queue = []
 schedules_lock = threading.Lock()
 
-def add_app_log(message):
+def add_app_log(message, event_type=None, event_data=None):
+    """
+    Dual-mode logging system:
+    1. Human-readable text for terminal and live web UI dashboard (emojis, timestamps).
+    2. P1-4 Structured JSON event log on disk (tbs_events_YYYY-MM-DD.jsonl) for quant audits,
+       machine analysis, and incident post-mortems without cluttering the UI.
+    """
     now_dt = get_now_ist()
     time_str = now_dt.strftime("%H:%M:%S")
     full_ts = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    iso_ts = now_dt.isoformat()
     formatted = f"[{time_str}] {message}"
     file_formatted = f"[{full_ts}] {message}\n"
     print(formatted)
@@ -111,12 +118,28 @@ def add_app_log(message):
         if len(app_logs) > 2000:
             app_logs.pop(0)
 
-    # 2. Daily persistent log file on disk (crucial for AWS remote server debugging)
+    # 2. Daily persistent text log file on disk (crucial for AWS remote server debugging)
+    date_str = now_dt.strftime("%Y-%m-%d")
     try:
-        date_str = now_dt.strftime("%Y-%m-%d")
         daily_log_path = os.path.join(current_dir, f"tbs_app_{date_str}.log")
         with open(daily_log_path, "a", encoding="utf-8") as f:
             f.write(file_formatted)
+    except Exception:
+        pass
+
+    # 3. P1-4 Structured JSONL event logging (auditable machine-readable stream)
+    try:
+        structured_event = {
+            "timestamp": iso_ts,
+            "event": event_type or "LOG_MESSAGE",
+            "message": message
+        }
+        if event_data and isinstance(event_data, dict):
+            structured_event.update(event_data)
+            
+        events_log_path = os.path.join(current_dir, f"tbs_events_{date_str}.jsonl")
+        with open(events_log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(structured_event) + "\n")
     except Exception:
         pass
 
@@ -1742,6 +1765,11 @@ def trigger_strategy_entry(strat):
         with orders_lock:
             orders_log.append(entry_log_entry)
         async_log_order_to_gsheet(entry_log_entry)
+        add_app_log(
+            f"Entry order recorded for {symbol} ({leg['position']}) @ {entry_price:.2f} [{order_status}]",
+            event_type="ORDER_ENTRY",
+            event_data=entry_log_entry
+        )
 
         # STRICT GUARD: If primary entry did not execute completely, skip SL, Target, and Position registration
         if not entry_success:
@@ -2445,6 +2473,11 @@ def square_off_leg(strat, leg, exit_price, reason):
         with orders_lock:
             orders_log.append(exit_log_entry)
         async_log_order_to_gsheet(exit_log_entry)
+        add_app_log(
+            f"Exit order recorded for {leg['symbol']} ({reason}) @ {exit_price:.2f} [{order_status}]",
+            event_type="ORDER_EXIT",
+            event_data=exit_log_entry
+        )
     else:
         # Broker-side SL or external exit already filled/closed the position
         executed_order_id = leg.get("sl_order_id") if reason == "SL Hit" else exit_order_id
@@ -2462,6 +2495,11 @@ def square_off_leg(strat, leg, exit_price, reason):
         }
         # Avoid duplicate appending if sl_order_id is already in orders_log, but ensure it is logged to Google Sheet
         async_log_order_to_gsheet(exit_log_entry)
+        add_app_log(
+            f"Passive exit recorded for {leg['symbol']} ({reason}) @ {exit_price:.2f}",
+            event_type="ORDER_EXIT_PASSIVE",
+            event_data=exit_log_entry
+        )
 
     # Zero out position
     with position_lock:
@@ -2538,6 +2576,32 @@ def download_logs():
     return Response(
         content,
         mimetype="text/plain",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@app.route("/api/events/download", methods=["GET"])
+def download_events():
+    """
+    P1-4: Downloads structured JSONL event log for a given date (default today).
+    Supports ?date=YYYY-MM-DD.
+    """
+    date_arg = request.args.get("date", "").strip()
+    if not date_arg:
+        date_arg = get_now_ist().strftime("%Y-%m-%d")
+
+    daily_events_path = os.path.join(current_dir, f"tbs_events_{date_arg}.jsonl")
+    content = ""
+    if os.path.exists(daily_events_path):
+        try:
+            with open(daily_events_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            content = f'{{"error": "Failed to read event log: {e}"}}\n'
+    
+    filename = f"ND_Kotak_Neo_TBS_Events_{date_arg}.jsonl"
+    return Response(
+        content,
+        mimetype="application/x-ndjson",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
