@@ -581,6 +581,11 @@ def try_restore_broker_session():
             sid = cached.get("sid")
             client.bearer_token = token
             client.token = token
+            if hasattr(client, "configuration"):
+                client.configuration.bearer_token = token
+                client.configuration.edit_token = token
+                if sid:
+                    client.configuration.edit_sid = sid
             if sid:
                 client.edit_sid = sid
                 client.sid = sid
@@ -1371,8 +1376,15 @@ async def websocket_manager():
                         add_app_log("WebSocket connection closed by server.")
                         break
         except Exception as e:
-            add_app_log(f"WebSocket Manager loop exception: {e}")
-            await asyncio.sleep(5)
+            err_str = str(e)
+            if "Authentication required" in err_str:
+                # Session credentials missing or expired - mark unauthenticated and pause retries
+                session_info["is_authenticated"] = False
+                add_app_log("⚠️ Kotak Neo session expired / authentication required. Please log in from the Login tab.")
+                await asyncio.sleep(15)
+            else:
+                add_app_log(f"WebSocket Manager loop exception: {e}")
+                await asyncio.sleep(5)
 
 # Background scheduler to monitor and execute strategies
 def run_strategy_scheduler():
