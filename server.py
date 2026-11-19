@@ -2212,6 +2212,10 @@ def monitor_active_deployment(strat, now_dt, now_str, now_secs):
         pnl = current_price - entry_price
         if leg["position"] == "Sell":
             pnl = -pnl
+
+        # Stop Loss configuration
+        sl_val = float(leg.get("stop_loss", 0))
+        sl_type = leg.get("stop_loss_type", "None")
             
         # Check Stop Loss & Target criteria
         sl_hit = False
