@@ -6,6 +6,7 @@ import json
 import threading
 import queue
 import asyncio
+import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import io
@@ -53,6 +54,11 @@ def load_dotenv():
 load_dotenv()
 
 app = Flask(__name__)
+
+# Suppress repetitive 200 OK access logs (e.g. GET /api/dashboard-updates every 2s) from terminal
+# Preserves actual web errors (HTTP 4xx/5xx) and all application trading logs
+werkzeug_logger = logging.getLogger("werkzeug")
+werkzeug_logger.setLevel(logging.ERROR)
 
 # Global in-memory storage
 client_instance = None
